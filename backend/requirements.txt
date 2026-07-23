@@ -1,9 +1,33 @@
+# Core FastAPI Framework & Server Bridge
 fastapi
 uvicorn
+a2wsgi
+
+# Data Validation & Settings
 pydantic
 pydantic-settings
+email-validator
+
+# Database & ORM (SQLModel / SQLAlchemy / Alembic)
 sqlmodel
 alembic
-asyncpg
+
+# MySQL / MariaDB Drivers (Required for cPanel)
+pymysql
+aiomysql
+cryptography
+
+# PostgreSQL Drivers (If connecting to Postgres)
 psycopg2-binary
-a2wsgi
+asyncpg
+
+# Authentication, Hashing & Security
+pyjwt
+pwdlib[argon2]
+argon2-cffi
+python-multipart
+
+# Utilities, Templating & Monitoring
+jinja2
+emails
+sentry-sdk

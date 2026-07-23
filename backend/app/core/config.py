@@ -1,6 +1,9 @@
 import secrets
 import warnings
 from typing import Annotated, Any, Literal
+from pydantic import MySQLDsn, computed_field
+from pydantic_core import MultiHostUrl
+from pathlib import Path
 
 from pydantic import (
     AnyUrl,
@@ -22,11 +25,13 @@ def parse_cors(v: Any) -> list[str] | str:
         return v
     raise ValueError(v)
 
+BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
+ENV_PATH = BACKEND_DIR / ".env"
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         # Use top level .env file (one level above ./backend/)
-        env_file="../.env",
+        env_file=ENV_PATH,
         env_ignore_empty=True,
         extra="ignore",
     )
@@ -50,24 +55,52 @@ class Settings(BaseSettings):
 
     PROJECT_NAME: str
     SENTRY_DSN: HttpUrl | None = None
+    # POSTGRES_SERVER: str
+    # POSTGRES_PORT: int = 5432
+    # POSTGRES_USER: str
+    # POSTGRES_PASSWORD: str = ""
+    # POSTGRES_DB: str = ""
+
+    # @computed_field  # type: ignore[prop-decorator]
+    # @property
+    # def SQLALCHEMY_DATABASE_URI(self) -> PostgresDsn:
+    #     return PostgresDsn.build(
+    #         scheme="postgresql+psycopg",
+    #         username=self.POSTGRES_USER,
+    #         password=self.POSTGRES_PASSWORD,
+    #         host=self.POSTGRES_SERVER,
+    #         port=self.POSTGRES_PORT,
+    #         path=self.POSTGRES_DB,
+    #     )
+
     POSTGRES_SERVER: str
-    POSTGRES_PORT: int = 5432
+    POSTGRES_PORT: int = 3306  # MySQL default port
     POSTGRES_USER: str
-    POSTGRES_PASSWORD: str = ""
-    POSTGRES_DB: str = ""
+    POSTGRES_PASSWORD: str
+    POSTGRES_DB: str
 
-    @computed_field  # type: ignore[prop-decorator]
+    @computed_field
     @property
-    def SQLALCHEMY_DATABASE_URI(self) -> PostgresDsn:
-        return PostgresDsn.build(
-            scheme="postgresql+psycopg",
-            username=self.POSTGRES_USER,
-            password=self.POSTGRES_PASSWORD,
-            host=self.POSTGRES_SERVER,
-            port=self.POSTGRES_PORT,
-            path=self.POSTGRES_DB,
-        )
-
+    def SQLALCHEMY_DATABASE_URI(self) -> str:
+        # If a full URI string is defined in .env, use it directly
+        if hasattr(self, "DATABASE_URL") and self.DATABASE_URL:
+            uri = str(self.DATABASE_URL)
+        else:
+            # Fallback to building the URI from individual fields
+            user = getattr(self, "MYSQL_USER", getattr(self, "POSTGRES_USER", "root"))
+            password = getattr(self, "MYSQL_PASSWORD", getattr(self, "POSTGRES_PASSWORD", ""))
+            server = getattr(self, "MYSQL_SERVER", getattr(self, "POSTGRES_SERVER", "localhost"))
+            port = getattr(self, "MYSQL_PORT", getattr(self, "POSTGRES_PORT", 3306))
+            db = getattr(self, "MYSQL_DB", getattr(self, "POSTGRES_DB", "app"))
+            uri = f"mysql+pymysql://{user}:{password}@{server}:{port}/{db}"
+    
+        # Ensure we use standard pymysql for synchronous cPanel WSGI
+        if uri.startswith("mysql+aiomysql://"):
+            uri = uri.replace("mysql+aiomysql://", "mysql+pymysql://")
+        
+        return uri
+        
+        
     SMTP_TLS: bool = True
     SMTP_SSL: bool = False
     SMTP_PORT: int = 587

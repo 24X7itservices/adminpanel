@@ -12,6 +12,10 @@ from app import crud
 from fastapi import FastAPI
 from app.api.main import api_router
 from app.core.security import SecurityService
+from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse
+
+import traceback
 
 
 
@@ -23,23 +27,45 @@ def custom_generate_unique_id(route: APIRoute) -> str:
 if settings.SENTRY_DSN and settings.ENVIRONMENT != "local":
     sentry_sdk.init(dsn=str(settings.SENTRY_DSN), enable_tracing=True)
 
+
+
+# Initialize FastAPI first
 app = FastAPI(
     title=settings.PROJECT_NAME,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    generate_unique_id_function=custom_generate_unique_id,
+    root_path="/api/admin",
 )
 
-# Set all CORS enabled origins
-if settings.all_cors_origins:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.all_cors_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+# Exception handler after app is created
+@app.exception_handler(Exception)
+async def debug_exception_handler(request: Request, exc: Exception):
+    error_trace = traceback.format_exc()
+    return PlainTextResponse(
+        status_code=500,
+        content=f"FASTAPI INNER ERROR TRACE:\n\n{error_trace}"
     )
 
 app.include_router(api_router, prefix=settings.API_V1_STR)
+
+
+
+# app = FastAPI(
+#     title=settings.PROJECT_NAME,
+#     openapi_url=f"{settings.API_V1_STR}/openapi.json",
+#     generate_unique_id_function=custom_generate_unique_id,
+# )
+
+# # Set all CORS enabled origins
+# if settings.all_cors_origins:
+#     app.add_middleware(
+#         CORSMiddleware,
+#         allow_origins=settings.all_cors_origins,
+#         allow_credentials=True,
+#         allow_methods=["*"],
+#         allow_headers=["*"],
+#     )
+
+# app.include_router(api_router, prefix=settings.API_V1_STR)
 
 # Configuration (In production, load these from environment variables!)
 AES_KEY_HEX = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -52,7 +78,7 @@ security = SecurityService(aes_key_hex=AES_KEY_HEX, jwt_secret=JWT_SECRET)
 class LoginPayload(BaseModel):
     formData: dict
 
-@app.post("/api/admin/login", tags=["login"])
+@app.post("/login", tags=["login"])
 async def login_route(payload: dict, db: SessionDep):
     """
     API Router: Intercepts network payload, decrypts it, and calls CRUD authentication.
