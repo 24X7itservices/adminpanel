@@ -107,7 +107,7 @@ class SecurityService:
             "iat": int(time.time()),
             "exp": int(time.time()) + (expiry_hours * 3600)
         }
-        return jwt.encode(payload, self.jwt_secret, algorithm=self.jwt_algorithm)
+        return jwt.encode(payload, settings.SECRET_KEY, algorithm=self.jwt_algorithm)
 
     def create_access_token(subject: str | Any, expires_delta: timedelta) -> str:
         expire = datetime.now(timezone.utc) + expires_delta

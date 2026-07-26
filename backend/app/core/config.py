@@ -1,9 +1,6 @@
 import secrets
 import warnings
 from typing import Annotated, Any, Literal
-from pydantic import MySQLDsn, computed_field
-from pydantic_core import MultiHostUrl
-from pathlib import Path
 
 from pydantic import (
     AnyUrl,
@@ -13,6 +10,7 @@ from pydantic import (
     PostgresDsn,
     computed_field,
     model_validator,
+    MySQLDsn,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import Self
@@ -25,18 +23,17 @@ def parse_cors(v: Any) -> list[str] | str:
         return v
     raise ValueError(v)
 
-BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
-ENV_PATH = BACKEND_DIR / ".env"
 
 class Settings(BaseSettings):
+    SECRET_KEY: str 
     model_config = SettingsConfigDict(
         # Use top level .env file (one level above ./backend/)
-        env_file=ENV_PATH,
+        env_file="../.env",
         env_ignore_empty=True,
         extra="ignore",
     )
     API_V1_STR: str = "/api/v1"
-    SECRET_KEY: str = secrets.token_urlsafe(32)
+    # SECRET_KEY: str = secrets.token_urlsafe(32)
     # 60 minutes * 24 hours * 8 days = 8 days
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 8
     FRONTEND_HOST: str = "http://localhost:5173"
@@ -73,34 +70,18 @@ class Settings(BaseSettings):
     #         path=self.POSTGRES_DB,
     #     )
 
-    POSTGRES_SERVER: str
-    POSTGRES_PORT: int = 3306  # MySQL default port
-    POSTGRES_USER: str
-    POSTGRES_PASSWORD: str
-    POSTGRES_DB: str
+
+    MYSQL_SERVER: str
+    MYSQL_PORT: int = 3306
+    MYSQL_USER: str
+    MYSQL_PASSWORD: str
+    MYSQL_DB: str
 
     @computed_field
     @property
     def SQLALCHEMY_DATABASE_URI(self) -> str:
-        # If a full URI string is defined in .env, use it directly
-        if hasattr(self, "DATABASE_URL") and self.DATABASE_URL:
-            uri = str(self.DATABASE_URL)
-        else:
-            # Fallback to building the URI from individual fields
-            user = getattr(self, "MYSQL_USER", getattr(self, "POSTGRES_USER", "root"))
-            password = getattr(self, "MYSQL_PASSWORD", getattr(self, "POSTGRES_PASSWORD", ""))
-            server = getattr(self, "MYSQL_SERVER", getattr(self, "POSTGRES_SERVER", "localhost"))
-            port = getattr(self, "MYSQL_PORT", getattr(self, "POSTGRES_PORT", 3306))
-            db = getattr(self, "MYSQL_DB", getattr(self, "POSTGRES_DB", "app"))
-            uri = f"mysql+pymysql://{user}:{password}@{server}:{port}/{db}"
-    
-        # Ensure we use standard pymysql for synchronous cPanel WSGI
-        if uri.startswith("mysql+aiomysql://"):
-            uri = uri.replace("mysql+aiomysql://", "mysql+pymysql://")
-        
-        return uri
-        
-        
+        return f"mysql+pymysql://{self.MYSQL_USER}:{self.MYSQL_PASSWORD}@{self.MYSQL_SERVER}:{self.MYSQL_PORT}/{self.MYSQL_DB}"
+
     SMTP_TLS: bool = True
     SMTP_SSL: bool = False
     SMTP_PORT: int = 587
@@ -141,7 +122,8 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _enforce_non_default_secrets(self) -> Self:
         self._check_default_secret("SECRET_KEY", self.SECRET_KEY)
-        self._check_default_secret("POSTGRES_PASSWORD", self.POSTGRES_PASSWORD)
+        self._check_default_secret("MYSQL_PASSWORD", self.MYSQL_PASSWORD)
+        # self._check_default_secret("POSTGRES_PASSWORD", self.POSTGRES_PASSWORD)
         self._check_default_secret(
             "FIRST_SUPERUSER_PASSWORD", self.FIRST_SUPERUSER_PASSWORD
         )
