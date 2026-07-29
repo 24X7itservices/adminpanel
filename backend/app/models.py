@@ -6,9 +6,8 @@ import uuid
 from datetime import datetime, timezone
 
 from pydantic import EmailStr
-from sqlalchemy import DateTime
 from sqlmodel import Field, Relationship, SQLModel
-from sqlalchemy import Column, Numeric, Text
+from sqlalchemy import Column, Numeric, DateTime, Integer, String, Text
 from sqlalchemy.orm import relationship
 
 def get_datetime_utc() -> datetime:
@@ -126,6 +125,8 @@ class Quotation(SQLModel, table=True):
     additional_offer: Optional[str] = None
     total_amount: Optional[float] = 0.0
     quotation_date: str = None
+    quotation_for: str = None
+    quotation_status: str
 
     # Relationship linked to QuotationProduct
     products: List["QuotationProduct"] = Relationship(
@@ -144,6 +145,7 @@ class QuotationProduct(SQLModel, table=True):
     
     product_name: str
     quantity: int
+    unit: str
     price: float
     gst: float
     total: float
@@ -156,6 +158,7 @@ class QuotationProductRead(SQLModel):
     id: Optional[int] = None
     product_name: str
     quantity: int
+    unit: str
     price: Decimal
     gst: Decimal
     total: Decimal
@@ -169,12 +172,15 @@ class QuotationReadWithProducts(SQLModel):
     total_amount: Optional[Decimal] = Decimal("0.00")
     quotation_date: Optional[Union[datetime, str]] = None  # 👈 Allows '26/07/2026' string
     url_call: str
+    quotation_for: str
+    quotation_status: str
     products: list[QuotationProductRead] = []
 
 
 # 3. Input Request Schemas
 class QuotationItemCreate(SQLModel):
     itemDescription: str
+    unit: str
     qty: int
     rate: Decimal
     gst: Decimal
@@ -191,3 +197,76 @@ class QuotationCreateRequest(SQLModel):
     items: list[QuotationItemCreate]
     grandTotal: Optional[Decimal] = None
     url_call:Optional[str] = None
+    quotation_for:str =None
+    quotation_status: str
+
+
+
+# ========================== CONTACT FORM MODELS ==========================
+
+class ContactForm(SQLModel, table=True):
+  __tablename__ = "contact_forms"
+
+  id: Optional[int] = Field(default=None, primary_key=True)
+  customer_id: Optional[int] = Field(
+      default=None, foreign_key="users.id", nullable=True
+  )
+  subject: str = Field(max_length=255, nullable=False)
+  message: str = Field(nullable=False)
+  status: Optional[str] = Field(default="pending", max_length=50)
+  submitted_at: Optional[datetime] = Field(
+      default_factory=datetime.utcnow, nullable=True
+  )
+  name: Optional[str] = Field(default=None, max_length=255)
+  email: Optional[str] = Field(default=None, max_length=255)
+
+
+
+class ContactFormPublic(UserBase):
+    id: uuid.UUID
+    created_at: datetime | None = None
+
+
+# ========================== QUOTATION REQUEST FORM MODELS ==========================
+
+class QuotationRequest(SQLModel, table=True):
+  __tablename__ = "quotation_requests"
+
+  id: Optional[int] = Field(default=None, primary_key=True)
+  customer_id: Optional[int] = Field(
+      default=None, foreign_key="users.id", nullable=True
+  )
+  full_name: str = Field(max_length=255, nullable=False)
+  email: str = Field(max_length=255, nullable=False)
+  phone: str = Field(max_length=50, nullable=False)
+  service_type: Optional[str] = Field(default="Residential", max_length=100)
+  installation_address: str = Field(nullable=False)
+  description: str = Field(nullable=False)
+  status: Optional[str] = Field(default="pending", max_length=50)
+  assigned_admin_id: Optional[int] = Field(
+      default=None, foreign_key="users.id", nullable=True
+  )
+  created_at: Optional[datetime] = Field(
+      default_factory=datetime.utcnow, nullable=True
+  )
+
+
+
+class QuotationRequestPublic(UserBase):
+    id: uuid.UUID
+    created_at: datetime | None = None
+
+
+
+class QuotationEmailRequest(SQLModel): # Or just use BaseModel if it's not a database table
+    client_email: EmailStr
+    client_name: str
+    ref_no: str
+    grand_total: float
+    download_link: str
+
+class TempCredentialsEmailRequest(SQLModel):
+    client_email: EmailStr
+    client_name: str
+    temp_password: str
+    login_link: str

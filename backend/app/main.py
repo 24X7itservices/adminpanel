@@ -4,7 +4,7 @@ from fastapi.encoders import jsonable_encoder
 import sentry_sdk
 import os
 import sys
-from fastapi import FastAPI, HTTPException, Depends, Query, status
+from fastapi import FastAPI, HTTPException, Depends, Query, status, APIRouter
 from fastapi.routing import APIRoute
 from starlette.middleware.cors import CORSMiddleware
 from app.api.deps import CurrentUser, SessionDep
@@ -15,8 +15,15 @@ from app import crud
 from fastapi import FastAPI
 from app.api.main import api_router
 from app.core.security import SecurityService
+from app.core.refrenceNumber import get_current_financial_year,generate_quotation_ref
 from app.models import UserCreate
 from app.models import Quotation, QuotationProduct, QuotationCreateRequest,QuotationReadWithProducts
+
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from app.models import QuotationEmailRequest, TempCredentialsEmailRequest
+from app.utils import send_quotation_email
+from app.utils import send_temporary_credentials_email as send_email_util
 
 
 
@@ -242,7 +249,29 @@ async def get_users_route(
 
 class EncryptedFormEnvelope(BaseModel):
     formData: dict
-@app.post("/api/admin/quotations", tags=["quotations"], status_code=status.HTTP_201_CREATED)
+
+@app.get("/api/admin/nextref", tags=["Quotations"])
+def preview_next_reference_number(db: SessionDep):
+    """
+    Endpoint for Angular to fetch the next preview reference number.
+    """
+    next_ref = generate_quotation_ref(db)
+
+    encrypted_data = security.encrypt_form_data(next_ref)
+    if not encrypted_data:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed."
+        )
+    
+    return {
+        "status": 200,
+        "message": "Refrence Fetched",
+        "data": encrypted_data
+    }
+
+
+@app.post("/api/admin/createquotations", tags=["quotations"], status_code=status.HTTP_201_CREATED)
 def create_quotation_route(
     payload: EncryptedFormEnvelope, 
     db: SessionDep  # or session: Session = Depends(get_session)
@@ -315,6 +344,7 @@ def get_quotation_by_ref_route(
             "id": getattr(p, "id", None),
             "quotation_reference_number": getattr(p, "quotation_reference_number", ""),
             "product_name": getattr(p, "product_name", ""),
+            "unit": getattr(p, "unit", ""),
             "quantity": getattr(p, "quantity", 0),
             "price": float(getattr(p, "price", 0.0) or 0.0),
             "gst": float(getattr(p, "gst", 0.0) or 0.0),
@@ -339,7 +369,9 @@ def get_quotation_by_ref_route(
         "total_amount": float(getattr(quotation, "total_amount", 0.0) or 0.0),
         "quotation_date": format_date(getattr(quotation, "quotation_date", None)),
         "url_call": getattr(quotation, "url_call", ref_no),
-        "products": products_list  # 👈 All 5 products passed cleanly here
+        "quotation_for": getattr(quotation, "quotation_for", ref_no),
+        "quotation_status": getattr(quotation, "quotation_status", ref_no),
+        "products": products_list
     }
 
     encrypted_data = security.encrypt_form_data(raw_payload)
@@ -391,3 +423,144 @@ def update_quotation_route(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to create quotation: {str(e)}"
         )
+
+@app.get("/api/admin/contact-form",tags=["contact-form"])
+def get_all_contact_form(
+    db: SessionDep,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500)
+):
+    contactform = crud.get_contact_form(session=db, skip=skip, limit=limit)
+    contactform_dict = jsonable_encoder(contactform)
+    # 4. Encrypt outbound list for Angular
+    encrypted_data = security.encrypt_form_data( contactform_dict)
+    if not encrypted_data:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed."
+        )
+
+    # 5. Return response envelope
+    return {
+        "status": 200,
+        "message": "Form Data retrieved successfully",
+        "count": len(contactform),
+        "data": encrypted_data
+    }
+    return contactform
+
+
+@app.get("/api/admin/quotation-request",tags=["quotation-request"])
+def get_all_quotations_request(
+    db: SessionDep,
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500)
+):
+    contactform = crud.get_quotation_request(session=db, skip=skip, limit=limit)
+    contactform_dict = jsonable_encoder(contactform)
+    # 4. Encrypt outbound list for Angular
+    encrypted_data = security.encrypt_form_data( contactform_dict)
+    if not encrypted_data:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed."
+        )
+
+    # 5. Return response envelope
+    return {
+        "status": 200,
+        "message": "Quotation Request retrieved successfully",
+        "count": len(contactform),
+        "data": encrypted_data
+    }
+    return contactform
+
+
+PDF_STORAGE_DIR = "static/quotations"
+os.makedirs(PDF_STORAGE_DIR, exist_ok=True)
+
+
+@app.post("/api/admin/generatewhatsapplink/{ref_no:path}", tags=["whatsapp"])
+def generate_whatsapp_quotation_pdf(ref_no: str, db: SessionDep):
+  try:
+    # 1. Fetch quotation from database using reference number
+    quotation = crud.get_quotation_by_ref_number(session=db, ref_no=ref_no)
+    if not quotation:
+      raise HTTPException(
+          status_code=status.HTTP_404_NOT_FOUND, detail="Quotation not found"
+      )
+
+    safe_filename = f"Quotation_{ref_no.replace('/', '_')}.pdf"
+    file_path = os.path.join(PDF_STORAGE_DIR, safe_filename)
+
+    c = canvas.Canvas(file_path, pagesize=letter)
+    
+    # Safe attribute extraction (supports both ORM models and dictionaries)
+    ref_num = getattr(quotation, "quotation_reference_number", "N/A")
+    client_id = getattr(quotation, "client_employee_id", "N/A")
+    total_amt = getattr(quotation, "total_amount", 0.0)
+
+    c.drawString(100, 750, f"PRICE QUOTATION - Ref: {ref_num}")
+    c.drawString(100, 730, f"Client ID: {client_id}")
+    c.drawString(100, 710, f"Total Amount: INR {total_amt}")
+    c.save()
+
+    # 3. Construct public downloadable URL (Replace with your actual domain name)
+    base_url = "http://127.0.0.1:8000/api/admin"
+    public_pdf_url = f"{base_url}/{PDF_STORAGE_DIR}/{safe_filename}"
+
+    # 4. Prepare response data & encrypt using your security handler
+    response_payload = {
+        "success": True,
+        "pdf_url": public_pdf_url,
+        "ref_no": ref_no,
+        "client_phone": getattr(quotation, "phone", ""),
+    }
+
+    encrypted_data = security.encrypt_form_data(response_payload)
+    if not encrypted_data:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed."
+        )
+
+    return {
+        "status": 200,
+        "message": "PDF generated and stored successfully",
+        "data": encrypted_data,
+    }
+
+  except Exception as e:
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+    )
+
+
+@app.post("/api/admin/send-mail", tags=["quotations"])
+def send_quotation_mail(payload: QuotationEmailRequest):
+    try:
+        send_quotation_email(
+            email_to=payload.client_email,
+            client_name=payload.client_name,
+            ref_no=payload.ref_no,
+            grand_total=payload.grand_total,
+            download_link=payload.download_link,
+        )
+        return {"message": "Quotation email sent successfully!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/admin/sendLoginCredentials", tags=["quotations"])
+def send_temporary_credentials_endpoint(payload: TempCredentialsEmailRequest):
+    try:
+        # Call the utility function using the alias
+        send_email_util(
+            client_email=payload.client_email,
+            client_name=payload.client_name,
+            temp_password=payload.temp_password,
+            login_link=payload.login_link,
+        )
+        return {"message": "Mail sent successfully!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

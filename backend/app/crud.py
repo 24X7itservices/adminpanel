@@ -6,6 +6,7 @@ from sqlalchemy.orm import selectinload
 from app.core.security import SecurityService
 from app.models import User, UserCreate, UserUpdate
 from app.models import Quotation, QuotationProduct, QuotationCreateRequest
+from app.models import ContactForm, QuotationRequest,QuotationRequestPublic
 
 
 def create_user(*, session: Session, user_create: UserCreate) -> User:
@@ -111,7 +112,8 @@ def create_quotation(*, session: Session, quotation_in: QuotationCreateRequest) 
         additional_offer=quotation_in.additional_emi_option or None,
         total_amount=quotation_in.grandTotal or None,
         quotation_date=quotation_in.date,
-        url_call = quotation_in.url_call
+        url_call = quotation_in.url_call,
+        quotation_for = quotation_in.quotation_for
     )
     session.add(db_quotation)
     session.flush()
@@ -122,6 +124,7 @@ def create_quotation(*, session: Session, quotation_in: QuotationCreateRequest) 
             quotation_reference_number=quotation_in.refNo,
             product_name=item.itemDescription,
             quantity=item.qty,
+            unit=item.unit,
             price=item.rate,
             gst=item.gst,
             total=item.total,
@@ -198,6 +201,7 @@ def update_quotation_by_ref_number(
             quotation_reference_number=quotation.quotation_reference_number,
             product_name=item.itemDescription,
             quantity=item.qty,
+            unit=item.unit,
             price=item.rate,
             gst=item.gst,
             total=item.total
@@ -208,3 +212,26 @@ def update_quotation_by_ref_number(
     session.commit()
     session.refresh(quotation)
     return quotation
+
+def get_contact_form(
+    session: Session, 
+    user_type: Optional[str] = None, 
+    skip: int = 0, 
+    limit: int = 100
+) -> list[ContactForm]:
+    
+    statement = select(ContactForm)        
+    statement = statement.offset(skip).limit(limit)
+    return session.exec(statement).all()
+
+
+def get_quotation_request(
+    session: Session, 
+    user_type: Optional[str] = None, 
+    skip: int = 0, 
+    limit: int = 100
+) -> list[QuotationRequest]:
+    
+    statement = select(QuotationRequest)        
+    statement = statement.offset(skip).limit(limit)
+    return session.exec(statement).all()

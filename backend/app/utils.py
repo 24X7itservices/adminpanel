@@ -12,6 +12,11 @@ from jwt.exceptions import InvalidTokenError
 from app.core import security
 from app.core.config import settings
 
+
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -121,3 +126,82 @@ def verify_password_reset_token(token: str) -> str | None:
         return str(decoded_token["sub"])
     except InvalidTokenError:
         return None
+
+
+def send_quotation_email(
+    *, email_to: str, client_name: str, ref_no: str, grand_total: float, download_link: str
+) -> None:
+    # 1. Load and render the HTML template
+    template_path = Path(settings.EMAIL_TEMPLATES_DIR) / "quotation_email.html"
+    template_str = template_path.read_text(encoding="utf-8")
+    html_content = Template(template_str).render(
+        project_name=settings.PROJECT_NAME,
+        client_name=client_name,
+        ref_no=ref_no,
+        grand_total=grand_total,
+        download_link=download_link,
+    )
+    
+    # 2. Build the MIME email message
+    message = MIMEMultipart("alternative")
+    message["Subject"] = f"Quotation Reference: {ref_no}"
+    message["From"] = f"{settings.EMAILS_FROM_NAME} <{settings.EMAILS_FROM_EMAIL}>"
+    message["To"] = email_to
+    
+    part = MIMEText(html_content, "html")
+    message.attach(part)
+    
+    # 3. Connect to SMTP server and send securely
+    try:
+        if settings.SMTP_SSL:
+            server = smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT)
+        else:
+            server = smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT)
+            if settings.SMTP_TLS:
+                server.starttls()
+                
+        if settings.SMTP_USER and settings.SMTP_PASSWORD:
+            server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+            
+        server.sendmail(settings.EMAILS_FROM_EMAIL, email_to, message.as_string())
+        server.quit()
+    except Exception as e:
+        raise ValueError(f"Failed to send email: {str(e)}")
+
+
+def send_temporary_credentials_email(
+    *, client_email: str, client_name: str, temp_password: str, login_link: str
+) -> None:
+    template_path = Path(settings.EMAIL_TEMPLATES_DIR) / "temporary_credentials.html"
+    template_str = template_path.read_text(encoding="utf-8")
+    
+    html_content = Template(template_str).render(
+        project_name=settings.PROJECT_NAME,
+        client_name=client_name,
+        client_email=client_email,
+        temp_password=temp_password,
+        login_link=login_link,
+    )
+    
+    message = MIMEMultipart("alternative")
+    message["Subject"] = f"Your Temporary Login Credentials - {settings.PROJECT_NAME}"
+    message["From"] = f"{settings.EMAILS_FROM_NAME} <{settings.EMAILS_FROM_EMAIL}>"
+    message["To"] = client_email
+    
+    message.attach(MIMEText(html_content, "html"))
+    
+    try:
+        if settings.SMTP_SSL:
+            server = smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT)
+        else:
+            server = smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT)
+            if settings.SMTP_TLS:
+                server.starttls()
+                
+        if settings.SMTP_USER and settings.SMTP_PASSWORD:
+            server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+            
+        server.sendmail(settings.EMAILS_FROM_EMAIL, client_email, message.as_string())
+        server.quit()
+    except Exception as e:
+        raise ValueError(f"Failed to send email: {str(e)}")
