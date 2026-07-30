@@ -180,6 +180,9 @@ def update_quotation_by_ref_number(
     # 2. Update parent quotation fields
     if payload.client_employee_id or payload.clientName:
         quotation.client_employee_id = payload.client_employee_id or payload.clientName
+
+    if payload.quotation_for:
+        quotation.quotation_for = payload.quotation_for
     
     quotation.additional_offer = payload.additional_emi_option
     if payload.grandTotal is not None:

@@ -38,6 +38,17 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 8
     FRONTEND_HOST: str = "http://localhost:5173"
     ENVIRONMENT: Literal["local", "staging", "production"] = "local"
+    # Base Domain / Host Settings
+    SERVER_HOST: str = "http://localhost:8000"
+    
+    @property
+    def BASE_URL(self) -> str:
+        """Dynamically construct base URL depending on environment."""
+        if self.ENVIRONMENT == "production":
+            return "https://24x7itservices.com/customerlogin/"
+        elif self.ENVIRONMENT == "staging":
+            return "https://24x7itservices.com/customerlogin/"
+        return self.SERVER_HOST.rstrip("/")
 
     BACKEND_CORS_ORIGINS: Annotated[
         list[AnyUrl] | str, BeforeValidator(parse_cors)
