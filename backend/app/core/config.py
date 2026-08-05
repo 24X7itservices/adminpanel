@@ -45,9 +45,9 @@ class Settings(BaseSettings):
     def BASE_URL(self) -> str:
         """Dynamically construct base URL depending on environment."""
         if self.ENVIRONMENT == "production":
-            return "https://24x7itservices.com/customerlogin/"
+            return "https://24x7itservices.in/backend/"
         elif self.ENVIRONMENT == "staging":
-            return "https://24x7itservices.com/customerlogin/"
+            return "https://24x7itservices.in/backend/"
         return self.SERVER_HOST.rstrip("/")
 
     BACKEND_CORS_ORIGINS: Annotated[

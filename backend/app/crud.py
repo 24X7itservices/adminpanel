@@ -1,13 +1,31 @@
 import re
-from typing import Any, Optional, Tuple, List
-
+from typing import Any, Optional, Tuple, List, Dict
 from sqlmodel import Session, func, select
 from sqlalchemy.orm import selectinload
 from app.core.security import SecurityService
 from app.models import User, UserCreate, UserUpdate
 from app.models import Quotation, QuotationProduct, QuotationCreateRequest
 from app.models import ContactForm, QuotationRequest,QuotationRequestPublic
+from app.models import (
+    Project,
+    ProjectCreate,
+    ProjectUpdate,
+    ProjectEmployee,
+    ProjectEmployeeCreate,
+    ProjectExpense,
+    ProjectExpenseCreate,
+    ProjectImage,
+    ProjectImageCreate,
+    EmployeeData,
+    EmployeeDataCreate,
+    Bill,
+    BillItem,
+    FullEmployeeCreate
+)
 
+from sqlmodel import Session, select, or_
+from sqlalchemy.orm import selectinload
+from app.models import Project, ProjectEmployee
 
 def create_user(*, session: Session, user_create: UserCreate) -> User:
     db_obj = User.model_validate(
@@ -113,7 +131,8 @@ def create_quotation(*, session: Session, quotation_in: QuotationCreateRequest) 
         total_amount=quotation_in.grandTotal or None,
         quotation_date=quotation_in.date,
         url_call = quotation_in.url_call,
-        quotation_for = quotation_in.quotation_for
+        quotation_for = quotation_in.quotation_for,
+        quotation_status = "Pending"
     )
     session.add(db_quotation)
     session.flush()
@@ -183,10 +202,16 @@ def update_quotation_by_ref_number(
 
     if payload.quotation_for:
         quotation.quotation_for = payload.quotation_for
-    
-    quotation.additional_offer = payload.additional_emi_option
+
+    if payload.date:
+            quotation.quotation_date = payload.date
+    if payload.additional_emi_option:
+        quotation.additional_offer = payload.additional_emi_option
     if payload.grandTotal is not None:
         quotation.total_amount = payload.grandTotal
+
+    if payload.quotation_status:
+            quotation.quotation_status = payload.quotation_status
 
     session.add(quotation)
 
@@ -216,6 +241,51 @@ def update_quotation_by_ref_number(
     session.refresh(quotation)
     return quotation
 
+def update_quotation_status(
+    *, 
+    session: Session, 
+    ref_no: str, 
+    new_status: str
+) -> Optional[Quotation]:
+    # Support both raw reference number and URL formatted reference number
+    formatted_ref = ref_no.replace("_", "/")
+    
+    statement = select(Quotation).where(
+        (Quotation.url_call == ref_no) | 
+        (Quotation.quotation_reference_number == formatted_ref)
+    )
+    quotation = session.exec(statement).first()
+
+    if not quotation:
+        return None
+
+    # Update ONLY the status field safely
+    quotation.quotation_status = new_status
+
+    session.add(quotation)
+    session.commit()
+    session.refresh(quotation)
+    return quotation
+
+def get_quotations_by_status(
+    session: Session, 
+    status: str, 
+    skip: int = 0, 
+    limit: int = 100
+) -> List[Quotation]:
+    """
+    Fetch all quotations matching a specific status, eager-loading products.
+    """
+    statement = (
+        select(Quotation)
+        .where(Quotation.quotation_status == status)
+        .order_by(Quotation.id.desc())
+        .offset(skip)
+        .limit(limit)
+        .options(selectinload(Quotation.products)) # eager-load products
+    )
+    return session.exec(statement).all()
+
 def get_contact_form(
     session: Session, 
     user_type: Optional[str] = None, 
@@ -238,3 +308,311 @@ def get_quotation_request(
     statement = select(QuotationRequest)        
     statement = statement.offset(skip).limit(limit)
     return session.exec(statement).all()
+
+
+# ==========================================
+# PROJECT CRUD OPERATIONS
+# ==========================================
+
+def create_project(*, session: Session, project_create: ProjectCreate) -> Project:
+    """Create a new project record."""
+    db_obj = Project.model_validate(project_create)
+    session.add(db_obj)
+    session.commit()
+    session.refresh(db_obj)
+    return db_obj
+
+
+def get_project_by_id(*, session: Session, project_db_id: int) -> Optional[Project]:
+    """Fetch a single project by primary key ID."""
+    return session.get(Project, project_db_id)
+
+
+def get_project_by_project_id(*, session: Session, project_id: str) -> Optional[Project]:
+    """Fetch a single project by string project_id (e.g. 'PRJ-1001')."""
+    statement = select(Project).where(Project.project_id == project_id)
+    return session.exec(statement).first()
+
+
+def get_projects(
+    *, session: Session, skip: int = 0, limit: int = 100, status: Optional[str] = None
+) -> List[Project]:
+    """List projects with optional filtering by project_status and pagination."""
+    statement = select(Project)
+    if status:
+        statement = statement.where(Project.project_status == status)
+    statement = statement.offset(skip).limit(limit)
+    return list(session.exec(statement).all())
+
+
+def update_project(
+    *, session: Session, db_project: Project, project_in: ProjectUpdate
+) -> Project:
+    """Update existing project fields."""
+    project_data = project_in.model_dump(exclude_unset=True)
+    db_project.sqlmodel_update(project_data)
+    session.add(db_project)
+    session.commit()
+    session.refresh(db_project)
+    return db_project
+
+
+def delete_project(*, session: Session, db_project: Project) -> None:
+    """Delete a project (associated expenses, images, and employees cascade automatically)."""
+    session.delete(db_project)
+    session.commit()
+
+
+# ==========================================
+# PROJECT EMPLOYEES CRUD
+# ==========================================
+
+def add_employee_to_project(
+    *, session: Session, employee_in: ProjectEmployeeCreate
+) -> ProjectEmployee:
+    """Assign an employee/client user to a project."""
+    db_obj = ProjectEmployee.model_validate(employee_in)
+    session.add(db_obj)
+    session.commit()
+    session.refresh(db_obj)
+    return db_obj
+
+
+def remove_employee_from_project(
+    *, session: Session, project_id: str, client_employee_id: int
+) -> bool:
+    """Remove an assigned employee from a project."""
+    statement = select(ProjectEmployee).where(
+        ProjectEmployee.project_id == project_id,
+        ProjectEmployee.client_employee_id == client_employee_id,
+    )
+    db_obj = session.exec(statement).first()
+    if db_obj:
+        session.delete(db_obj)
+        session.commit()
+        return True
+    return False
+
+
+# ==========================================
+# PROJECT EXPENSES CRUD
+# ==========================================
+
+def create_project_expense(session: Session, expense_in: ProjectExpenseCreate):
+    db_obj = ProjectExpense.model_validate(expense_in)
+    session.add(db_obj)
+    session.commit()
+    session.refresh(db_obj)
+    return db_obj
+
+
+def delete_project_expense(*, session: Session, expense_id: int) -> bool:
+    """Delete a project expense record by ID."""
+    db_obj = session.get(ProjectExpense, expense_id)
+    if db_obj:
+        session.delete(db_obj)
+        session.commit()
+        return True
+    return False
+
+
+# ==========================================
+# PROJECT IMAGES CRUD
+# ==========================================
+
+def create_project_image(
+    *, session: Session, image_in: ProjectImageCreate
+) -> ProjectImage:
+    """Add an image record to a project."""
+    db_obj = ProjectImage.model_validate(image_in)
+    session.add(db_obj)
+    session.commit()
+    session.refresh(db_obj)
+    return db_obj
+
+
+def delete_project_image(*, session: Session, image_id: int) -> bool:
+    """Delete a project image record by ID."""
+    db_obj = session.get(ProjectImage, image_id)
+    if db_obj:
+        session.delete(db_obj)
+        session.commit()
+        return True
+    return False
+
+
+def generate_next_project_id(session: Session, prefix: str = "PRJ") -> str:
+
+    statement = select(Project).order_by(Project.id.desc()).limit(1)
+    last_project = session.exec(statement).first()
+
+    if not last_project or not last_project.project_id:
+        return f"{prefix}-0001"
+
+    numbers = re.findall(r'\d+', last_project.project_id)
+    if numbers:
+        last_number = int(numbers[-1])
+        next_number = last_number + 1
+    else:
+        next_number = 1
+
+    return f"{prefix}-{next_number:04d}"
+
+
+def get_project_full_details_by_id(session: Session, project_identifier: str) -> Optional[Project]:
+
+    # 1. Always match against the string project_id (e.g. "PRJ-0001")
+    conditions = [Project.project_id == project_identifier]
+    
+    # 2. Only add the integer ID condition if the string is purely numeric (e.g. "12")
+    if project_identifier.isdigit():
+        conditions.append(Project.id == int(project_identifier))
+
+    # 3. Construct query with SQLModel or_()
+    statement = (
+        select(Project)
+        .where(or_(*conditions))
+        .options(
+            selectinload(Project.client_employee),
+            selectinload(Project.quotation),
+            selectinload(Project.expenses),
+            selectinload(Project.images),
+            selectinload(Project.project_employees).selectinload(ProjectEmployee.client_employee)
+        )
+    )
+    
+    return session.exec(statement).first()
+
+# ==========================================
+# EMPLOYEE DATA CRUD
+# ==========================================
+
+def get_employee_by_client_employee_id(
+    session: Session, client_employee_id: str
+) -> Optional[User]:
+    """
+    Retrieves a single user with their linked employee metadata.
+    """
+    statement = (
+        select(User)
+        .where(User.client_employee_id == client_employee_id)
+        .options(selectinload(User.employee_data))
+    )
+    return session.exec(statement).first()
+
+
+def get_all_employees_with_details(
+    session: Session, skip: int = 0, limit: int = 100
+) -> List[User]:
+    statement = (
+        select(User)
+        .where(User.role == "employee")
+        .offset(skip)
+        .limit(limit)
+        .options(
+            selectinload(User.employee_data),
+            selectinload(User.project_employees),
+            # selectinload(ProjectEmployee.project),
+        )
+    )
+    return session.exec(statement).all()
+
+# ==========================================
+# EMPLOYEE DATA CRUD
+# ==========================================
+
+def create_bill_with_items(session: Session, bill_data: dict) -> Bill:
+
+    bill_ref_no = bill_data.get("bill_refrence_number")
+    urlcall = bill_ref_no.replace('/', '_')
+
+    # 1. Instantiate Parent Bill
+    new_bill = Bill(
+        bill_refrence_number=bill_ref_no,
+        quotation_reference_number=bill_data.get("quotation_reference_number"),
+        client_employee_id=bill_data.get("client_employee_id"),
+        total_amount=bill_data.get("total_amount", 0.0),
+        status=bill_data.get("status", "unpaid"),
+        url_call=urlcall,
+        place_of_supply=bill_data.get("place_of_supply", "")
+    )
+    session.add(new_bill)
+    session.commit()
+    session.refresh(new_bill)
+
+    # 2. Add Item Rows
+    items_payload = bill_data.get("items", [])
+    for item in items_payload:
+        bill_item = BillItem(
+            bill_refrence_number=bill_ref_no,
+            name=item.get("name"),
+            hsn=item.get("hsn"),
+            quantity=item.get("quantity", 0),
+            unit=item.get("unit"),
+            price_per_unit=item.get("pricePerUnit", 0.0),
+        )
+        session.add(bill_item)
+
+    session.commit()
+    session.refresh(new_bill)
+    return new_bill
+
+
+def get_all_bills(
+    session: Session, skip: int = 0, limit: int = 100
+) -> List[Bill]:
+    """
+    Retrieves all bills along with their nested line items sorted by latest created first.
+    """
+    statement = (
+        select(Bill)
+        .order_by(Bill.id.desc())
+        .offset(skip)
+        .limit(limit)
+        .options(selectinload(Bill.items))
+    )
+    return session.exec(statement).all()
+
+
+def get_bill_by_reference(
+    session: Session, bill_refrence_number: str
+) -> Optional[Bill]:
+    """
+    Retrieves a single bill by its unique reference number with nested items.
+    """
+    statement = (
+        select(Bill)
+        .where(Bill.bill_refrence_number == bill_refrence_number)
+        .options(selectinload(Bill.items))
+    )
+    return session.exec(statement).first()
+
+
+def create_employee_full(db: Session, data_in: FullEmployeeCreate) -> Dict[str, Any]:
+    """
+    Creates records in both the 'users' and 'employee_data' tables atomically.
+    """
+    try:
+        # 2. Create EmployeeData Instance
+        db_employee_data = EmployeeData.model_validate(data_in)
+        db.add(db_employee_data)
+
+        # 3. Commit both atomically
+        db.commit()
+        db.refresh(db_employee_data)
+
+        return {
+            "employee_data": db_employee_data
+        }
+
+    except Exception as e:
+        db.rollback()
+        raise e
+
+
+def get_employee_by_client_id(db: Session, client_employee_id: str) -> Optional[User]:
+    """
+    Fetches the User record along with its related EmployeeData by client_employee_id.
+    """
+    statement = select(User).where(User.client_employee_id == client_employee_id)
+    return db.exec(statement).first()

@@ -1,10 +1,11 @@
-from typing import Optional
+import json
+from typing import List, Optional
 
 from fastapi.encoders import jsonable_encoder
 import sentry_sdk
 import os
 import sys
-from fastapi import FastAPI, HTTPException, Depends, Query, status, APIRouter
+from fastapi import FastAPI, HTTPException, Depends, Query, status, APIRouter, UploadFile, File, Form, Request
 from fastapi.routing import APIRoute
 from starlette.middleware.cors import CORSMiddleware
 from app.api.deps import CurrentUser, SessionDep
@@ -12,31 +13,42 @@ from app.core.config import settings
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from app import crud
-from fastapi import FastAPI
 from app.api.main import api_router
 from app.core.security import SecurityService
-from app.core.refrenceNumber import get_current_financial_year,generate_quotation_ref
-from app.models import UserCreate
+from app.core.refrenceNumber import generate_invoice_ref, get_current_financial_year,generate_quotation_ref
+from app.models import QuotationStatusUpdate, UserCreate
 from app.models import Quotation, QuotationProduct, QuotationCreateRequest,QuotationReadWithProducts
-
+from fastapi.encoders import jsonable_encoder
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 from app.models import QuotationEmailRequest, TempCredentialsEmailRequest
 from app.utils import send_quotation_email
 from app.utils import send_temporary_credentials_email as send_email_util
-
-
-import os
 import base64
 from io import BytesIO
-from fastapi import FastAPI, HTTPException, status
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether, Image
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
 
-
+from app.models import (
+    ProjectCreate,
+    ProjectUpdate,
+    ProjectPublic,
+    ProjectPublicWithDetails,
+    ProjectEmployeeCreate,
+    ProjectExpenseCreate,
+    ProjectImageCreate,
+    ProjectFullDetailsPublic,
+    EmployeeData,
+    UserWithEmployeeDataPublic,
+    EmployeeDataCreate
+)
+import uuid
+import aiofiles
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status
+from fastapi.staticfiles import StaticFiles
 
 
 def custom_generate_unique_id(route: APIRoute) -> str:
@@ -74,6 +86,10 @@ security = SecurityService(aes_key_hex=AES_KEY_HEX, jwt_secret=JWT_SECRET)
 # Strict schema definition matching your frontend request body payload
 class LoginPayload(BaseModel):
     formData: dict
+
+# ==========================================
+# AUTH
+# ==========================================
 
 @app.post("/api/admin/login", tags=["login"])
 async def login_route(payload: dict, db: SessionDep):
@@ -127,84 +143,138 @@ async def login_route(payload: dict, db: SessionDep):
         "data": encrypted_user_data
     }
 
+# ==========================================
+# USERS
+# ==========================================
+
+# Create uploads directory
+
+
+def save_uploaded_file(file: Optional[UploadFile], folder: str) -> Optional[str]:
+    if not file or not file.filename:
+        return None
+    
+    upload_dir = os.path.join("uploads/employee", folder)
+    os.makedirs(upload_dir, exist_ok=True)
+    
+    file_extension = os.path.splitext(file.filename)[1]
+    unique_filename = f"{uuid.uuid4().hex}{file_extension}"
+    file_path = os.path.join(upload_dir, unique_filename)
+    
+    # Read binary stream directly
+    with open(file_path, "wb") as f:
+        f.write(file.file.read())
+        
+    return file_path.replace("\\", "/")
 
 
 @app.post("/api/admin/create_user", tags=["create-user"])
-async def create_user_route(payload: dict, db: SessionDep, current_user: CurrentUser):
-    """
-    API Router: Intercepts network payload, decrypts it, and calls CRUD authentication.
-    """
-    # 1. Decrypt incoming data package bundle from Angular
-    decrypted_data = security.decrypt_form_data(payload)
-    if not decrypted_data:
-        raise HTTPException(
-            status_code=400, 
-            detail="Security verification failed. Invalid encryption envelope."
-        )
-        
-    email = decrypted_data.get("email")
-
-    # 2. Pass clean parameters directly to your keyword-enforced CRUD function
-    user = crud.get_user_by_email(session=db, email=email)
+async def create_user_route(
+    db: SessionDep,
+    current_user: CurrentUser,
+    # Standard Form Fields
+    role: str = Form(...),
+    employee_email: Optional[str] = Form(None),
+    email: Optional[str] = Form(None),
+    password: str = Form(...),
     
-    if user and user.role == "client":
+    # Employee Fields
+    employee_name: Optional[str] = Form(None),
+    employee_contactNumber: Optional[str] = Form(None),
+    employee_address: Optional[str] = Form(None),
+    employee_pincode: Optional[str] = Form(None),
+    employee_district: Optional[str] = Form(None),
+    employee_state: Optional[str] = Form(None),
+    
+    # Bank Details
+    employee_bankname: Optional[str] = Form(None),
+    employee_account_name: Optional[str] = Form(None),
+    employee_ifsecode: Optional[str] = Form(None),  # Accepts "employee_ifsecode" from payload
+    employee_account_number: Optional[str] = Form(None),
+    
+    # Binary Upload File Handlers (Must be UploadFile, NOT bytes!)
+    aadhar_card: Optional[UploadFile] = File(None),
+    pan_card: Optional[UploadFile] = File(None),
+    dl: Optional[UploadFile] = File(None),
+):
+    # Determine the target email
+    user_email = email if role == "client" else employee_email
+    if not user_email:
         raise HTTPException(
-            status_code=400, 
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email address is required."
+        )
+
+    # 1. Check duplicate user
+    existing_user = crud.get_user_by_email(session=db, email=user_email)
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="User with this email already exists in the system."
         )
 
-    client_name = decrypted_data.get("client_name")
-    contactNumber = decrypted_data.get("contactNumber")
-    district = decrypted_data.get("district")
-    state = decrypted_data.get("state")
-    pincode = decrypted_data.get("pincode")
-    address = decrypted_data.get("address")
-    password = decrypted_data.get("password")
-    role = decrypted_data.get("role")
-
-    if role == "client":
-        next_emp_id = crud.generate_next_employee_id(session=db, prefix="CLI", padding=4)
-
+    # 2. Generate Next Employee ID
     if role == "employee":
         next_emp_id = crud.generate_next_employee_id(session=db, prefix="EMP", padding=4)
-
-    if role == "admin" and role == "superadmin":
+    elif role == "client":
+        next_emp_id = crud.generate_next_employee_id(session=db, prefix="CLI", padding=4)
+    else:
         next_emp_id = None
+
+    # 3. Handle Employee Creation
+    if role == "employee":
+        # Save Binary Files safely
+        aadhar_path = save_uploaded_file(aadhar_card, "aadhar")
+        pan_path = save_uploaded_file(pan_card, "pan")
+        dl_path = save_uploaded_file(dl, "dl")
         
-    user_in = UserCreate(
-        name=client_name,
-        email=email,
-        phone=contactNumber,
-        role=role,
-        address=address,
-        referral_code=None,
-        terms_and_condition=False,
-        is_active=True,
-        profile_avatar=None,
-        client_employee_id=next_emp_id,
-        pincode=pincode,
-        district=district,
-        state=state,
-        password=password
+        aadhar_file_url = f"{settings.BASE_URL}/{aadhar_path}"
+        pan_file_url = f"{settings.BASE_URL}/{pan_path}"
+        dl_file_url = f"{settings.BASE_URL}/{dl_path}"
+
+        # Create Primary User
+        user_in = UserCreate(
+            name=employee_name,
+            email=user_email,
+            phone=employee_contactNumber,
+            role=role,
+            address=employee_address,
+            client_employee_id=next_emp_id,
+            pincode=employee_pincode,
+            district=employee_district,
+            state=employee_state,
+            password=password,
+            organisation_name="NA",
+            terms_and_condition=True,
         )
-    
-    new_user = crud.create_user(session=db, user_create=user_in)
+        new_user = crud.create_user(session=db, user_create=user_in)
 
-    if not new_user:
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to create user record in the database."
+        # Create Secondary Employee Data
+        data_in = EmployeeDataCreate(
+            client_employee_id=next_emp_id,
+            aadhar_file_url=aadhar_file_url,
+            pancard_file_url=pan_file_url,
+            dl_file_url=dl_file_url,
+            bank_name=employee_bankname,
+            account_name=employee_account_name,
+            ifsc_code=employee_ifsecode,
+            account_number=employee_account_number,
         )
 
-    
-    # 4. Return standard authentication keys back to Angular
-    return {
-        "status": 200,
-        "message": "User created successfully"
-    }
+        try:
+            crud.create_employee_full(db=db, data_in=data_in)
+        except Exception as e:
+            # Rollback primary user if details insert fails
+            db.delete(new_user)
+            db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to record employee data: {str(e)}"
+            )
 
+        return {"status": 200, "message": "User created successfully"}
 
-
+    return {"status": 400, "message": "Invalid role specified"}
 @app.get("/api/admin/getUsers", tags=["users"])
 async def get_users_route(
     db: SessionDep,
@@ -238,7 +308,8 @@ async def get_users_route(
             "state": getattr(user, "state", None),
             "address": getattr(user, "address", None),
             "pincode": getattr(user, "pincode", None),
-            "created_at": str(getattr(user, "created_at", ""))
+            "created_at": str(getattr(user, "created_at", "")),
+            "organisation_name": str(getattr(user, "organisation_name", "")),
         })
 
     # 4. Encrypt outbound list for Angular
@@ -261,6 +332,10 @@ async def get_users_route(
 class EncryptedFormEnvelope(BaseModel):
     formData: dict
 
+# ==========================================
+# QUOTATIONS
+# ==========================================
+
 @app.get("/api/admin/nextref", tags=["Quotations"])
 def preview_next_reference_number(db: SessionDep):
     """
@@ -280,7 +355,6 @@ def preview_next_reference_number(db: SessionDep):
         "message": "Refrence Fetched",
         "data": encrypted_data
     }
-
 
 @app.post("/api/admin/createquotations", tags=["quotations"], status_code=status.HTTP_201_CREATED)
 def create_quotation_route(
@@ -332,6 +406,31 @@ def get_all_quotations_route(
         "data": encrypted_data
     }
     return quotations
+
+@app.get("/api/admin/quotations/status/{status_name}",response_model=dict,tags=["Quotations"],summary="Get quotations filtered by status",)
+def get_quotations_by_status_route(
+    status_name: str,
+    session: SessionDep,
+    current_user: CurrentUser,
+    skip: int = 0,
+    limit: int = 100,
+):
+    """
+    Retrieves all quotations matching the specified status (e.g., Accepted, Pending, Billed).
+    """
+    quotations = crud.get_quotations_by_status(
+        session=session, status=status_name, skip=skip, limit=limit
+    )
+
+    # Convert to JSON-compatible data & encrypt outbound payload
+    json_safe_data = jsonable_encoder(quotations)
+    encrypted_payload = security.encrypt_form_data(json_safe_data)
+
+    return {
+        "status": 200,
+        "message": f"Quotations with status '{status_name}' fetched successfully",
+        "data": encrypted_payload
+    }
 
 
 @app.post("/api/admin/quotations/{ref_no:path}",tags=["quotations"])
@@ -435,6 +534,97 @@ def update_quotation_route(
             detail=f"Failed to create quotation: {str(e)}"
         )
 
+def update_quotation_status_route(
+    ref_no: str,
+    db: SessionDep,
+    payload: EncryptedFormEnvelope,
+):
+    try:
+        # 1. Decrypt incoming envelope
+        decrypted_data = security.decrypt_form_data(payload.model_dump())
+        if not decrypted_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Security verification failed. Invalid encryption envelope.",
+            )
+
+        # 2. Validate payload schema
+        status_data = QuotationStatusUpdate.model_validate(decrypted_data)
+
+        # 3. Perform atomic status update in DB
+        updated_quotation = crud.update_quotation_status(
+            session=db,
+            ref_no=ref_no,
+            new_status=status_data.status,
+        )
+
+        if not updated_quotation:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Quotation with reference '{ref_no}' was not found.",
+            )
+
+        return {
+            "status": 200,
+            "message": f"Quotation status updated to '{status_data.status}' successfully.",
+            "data": {
+                "quotation_reference_number": updated_quotation.quotation_reference_number,
+                "status": updated_quotation.quotation_status
+            }
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to update quotation status: {str(e)}",
+        )
+
+@app.patch("/api/admin/quotations_status_update/{ref_no:path}",tags=["Quotations"],status_code=status.HTTP_200_OK,summary="Update only the status of a quotation",)
+def update_quotation_status_route(
+    ref_no: str,
+    db: SessionDep,
+    payload: EncryptedFormEnvelope,
+):
+    try:
+        # 1. Decrypt incoming envelope
+        decrypted_data = security.decrypt_form_data(payload.model_dump())
+        if not decrypted_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Security verification failed. Invalid encryption envelope.",
+            )
+
+        # 2. Validate payload
+        status_data = QuotationStatusUpdate.model_validate(decrypted_data)
+
+        # 3. Perform update in DB using status_data.quotation_status
+        updated_quotation = crud.update_quotation_status(
+            session=db,
+            ref_no=ref_no,
+            new_status=status_data.quotation_status,  # ✅ Corrected key
+        )
+
+        if not updated_quotation:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Quotation with reference '{ref_no}' was not found.",
+            )
+
+        return {
+            "status": 200,
+            "message": f"Quotation status updated to '{status_data.quotation_status}' successfully.",
+            "data": {
+                "quotation_reference_number": updated_quotation.quotation_reference_number,
+                "status": updated_quotation.quotation_status
+            }
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to update quotation status: {str(e)}",
+        )
+    
 @app.get("/api/admin/contact-form",tags=["contact-form"])
 def get_all_contact_form(
     db: SessionDep,
@@ -459,7 +649,6 @@ def get_all_contact_form(
         "data": encrypted_data
     }
     return contactform
-
 
 @app.get("/api/admin/quotation-request",tags=["quotation-request"])
 def get_all_quotations_request(
@@ -486,66 +675,8 @@ def get_all_quotations_request(
     }
     return contactform
 
-
 PDF_STORAGE_DIR = "quotations"
 os.makedirs(PDF_STORAGE_DIR, exist_ok=True)
-
-
-# @app.post("/api/admin/generatewhatsapplink/{ref_no:path}", tags=["whatsapp"])
-# def generate_whatsapp_quotation_pdf(ref_no: str, db: SessionDep):
-#   try:
-#     # 1. Fetch quotation from database using reference number
-#     quotation = crud.get_quotation_by_ref_number(session=db, ref_no=ref_no)
-#     if not quotation:
-#       raise HTTPException(
-#           status_code=status.HTTP_404_NOT_FOUND, detail="Quotation not found"
-#       )
-
-#     safe_filename = f"Quotation_{ref_no.replace('/', '_')}.pdf"
-#     file_path = os.path.join(PDF_STORAGE_DIR, safe_filename)
-
-#     c = canvas.Canvas(file_path, pagesize=letter)
-    
-#     # Safe attribute extraction (supports both ORM models and dictionaries)
-#     ref_num = getattr(quotation, "quotation_reference_number", "N/A")
-#     client_id = getattr(quotation, "client_employee_id", "N/A")
-#     total_amt = getattr(quotation, "total_amount", 0.0)
-
-#     c.drawString(100, 750, f"PRICE QUOTATION - Ref: {ref_num}")
-#     c.drawString(100, 730, f"Client ID: {client_id}")
-#     c.drawString(100, 710, f"Total Amount: INR {total_amt}")
-#     c.save()
-
-#     # 3. Construct public downloadable URL (Replace with your actual domain name)
-    
-#     public_pdf_url = f"{settings.BASE_URL}/{PDF_STORAGE_DIR}/{safe_filename}"
-
-#     # 4. Prepare response data & encrypt using your security handler
-#     response_payload = {
-#         "success": True,
-#         "pdf_url": public_pdf_url,
-#         "ref_no": ref_no,
-#         "client_phone": getattr(quotation, "phone", ""),
-#     }
-
-#     encrypted_data = security.encrypt_form_data(response_payload)
-#     if not encrypted_data:
-#         raise HTTPException(
-#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-#             detail="Outbound encryption failed."
-#         )
-
-#     return {
-#         "status": 200,
-#         "message": "PDF generated and stored successfully",
-#         "data": encrypted_data,
-#     }
-
-#   except Exception as e:
-#     raise HTTPException(
-#         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
-#     )
-
 
 @app.post("/api/admin/send-mail", tags=["quotations"])
 def send_quotation_mail(payload: QuotationEmailRequest):
@@ -561,7 +692,6 @@ def send_quotation_mail(payload: QuotationEmailRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
 @app.post("/api/admin/sendLoginCredentials", tags=["quotations"])
 def send_temporary_credentials_endpoint(payload: TempCredentialsEmailRequest):
     try:
@@ -575,8 +705,6 @@ def send_temporary_credentials_endpoint(payload: TempCredentialsEmailRequest):
         return {"message": "Mail sent successfully!"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
 
 
 # =========================================================================
@@ -804,7 +932,6 @@ def build_quotation_pdf_file(data: dict, file_path: str, company_logo_b64: str =
     story.append(KeepTogether(footer_elements))
     doc.build(story)
 
-
 @app.post("/api/admin/generatewhatsapplink/{ref_no:path}", tags=["whatsapp"])
 def generate_whatsapp_quotation_pdf(ref_no: str, db: SessionDep):
     try:
@@ -894,3 +1021,551 @@ def generate_whatsapp_quotation_pdf(ref_no: str, db: SessionDep):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
             detail=str(e)
         )
+
+# ==========================================
+# PROJECT
+# ==========================================
+
+@app.post("/api/admin/projects",tags=["projects"],status_code=status.HTTP_201_CREATED,)
+def create_project_route(
+    payload: EncryptedFormEnvelope,
+    db: SessionDep,
+):
+    try:
+        decrypted_data = security.decrypt_form_data(payload.model_dump())
+        if not decrypted_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Security verification failed. Invalid encryption envelope.",
+            )
+
+        # 1. Auto-generate project_id if not provided in decrypted payload
+        if not decrypted_data.get("project_id"):
+            decrypted_data["project_id"] = crud.generate_next_project_id(session=db, prefix="PRJ")
+
+        project_in = ProjectCreate(**decrypted_data)
+
+        # 2. Safety check in case of collision
+        existing_project = crud.get_project_by_project_id(
+            session=db, project_id=project_in.project_id
+        )
+        if existing_project:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Project with ID '{project_in.project_id}' already exists.",
+            )
+
+        # 3. Create record in DB
+        project = crud.create_project(session=db, project_create=project_in)
+        return {
+            "success": 201,
+            "message": "Project created successfully",
+            "data": project,
+        }
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to create project: {str(e)}",
+        )
+
+@app.get("/api/admin/projects",tags=["projects"],status_code=status.HTTP_200_OK,)
+def get_projects_route(
+    db: SessionDep,
+    skip: int = 0,
+    limit: int = 100,
+    status_filter: Optional[str] = None,
+):
+    try:
+        projects = crud.get_projects(
+            session=db, skip=skip, limit=limit, status=status_filter
+        )
+        projectencode = jsonable_encoder(projects)
+        encrypted_data = security.encrypt_form_data(projectencode)
+        if not encrypted_data:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Outbound encryption failed."
+            )
+    
+        # 5. Return response envelope
+        return {
+            "status": 200,
+            "message": "Project Data retrieved successfully",
+            "count": len(projects),
+            "data": encrypted_data
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to fetch projects: {str(e)}",
+        )
+
+@app.get("/api/admin/projects/{project_db_id}",tags=["projects"],response_model=ProjectPublicWithDetails,status_code=status.HTTP_200_OK,)
+def get_project_by_id_route(
+    project_db_id: int,
+    db: SessionDep,
+):
+    project = crud.get_project_by_id(session=db, project_db_id=project_db_id)
+    if not project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project not found",
+        )
+    return project
+
+@app.put("/api/admin/projects/{project_db_id}",tags=["projects"],status_code=status.HTTP_200_OK,)
+def update_project_route(
+    project_db_id: int,
+    payload: EncryptedFormEnvelope,
+    db: SessionDep,
+):
+    try:
+        decrypted_data = security.decrypt_form_data(payload.model_dump())
+        if not decrypted_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Security verification failed. Invalid encryption envelope.",
+            )
+
+        db_project = crud.get_project_by_id(session=db, project_db_id=project_db_id)
+        if not db_project:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Project not found",
+            )
+
+        project_in = ProjectUpdate(**decrypted_data)
+        updated_project = crud.update_project(
+            session=db, db_project=db_project, project_in=project_in
+        )
+        return {
+            "success": 200,
+            "message": "Project updated successfully",
+            "data": updated_project,
+        }
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to update project: {str(e)}",
+        )
+
+@app.delete("/api/admin/projects/{project_db_id}",tags=["projects"],status_code=status.HTTP_200_OK,)
+def delete_project_route(
+    project_db_id: int,
+    db: SessionDep,
+):
+    try:
+        db_project = crud.get_project_by_id(session=db, project_db_id=project_db_id)
+        if not db_project:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Project not found",
+            )
+
+        crud.delete_project(session=db, db_project=db_project)
+        return {
+            "success": 200,
+            "message": "Project deleted successfully",
+        }
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to delete project: {str(e)}",
+        )
+
+@app.post("/api/admin/projects/employees",tags=["projects"],status_code=status.HTTP_201_CREATED,)
+def add_project_employee_route(
+    payload: EncryptedFormEnvelope,
+    db: SessionDep,
+):
+    try:
+        decrypted_data = security.decrypt_form_data(payload.model_dump())
+        if not decrypted_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Security verification failed. Invalid encryption envelope.",
+            )
+
+        employee_in = ProjectEmployeeCreate(**decrypted_data)
+        assigned = crud.add_employee_to_project(
+            session=db, employee_in=employee_in
+        )
+        return {
+            "success": 201,
+            "message": "Employee assigned to project successfully",
+            "data": assigned,
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to assign employee to project: {str(e)}",
+        )
+
+
+UPLOAD_DIR = "uploads/expense_proofs"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+@app.post("/api/admin/projects-expenses",tags=["projects"],status_code=status.HTTP_201_CREATED,)
+async def add_project_expense(
+    project_id: str = Form(...),
+    expense_type: str = Form(...),
+    expense_value: float = Form(...),
+    expense_description: str =Form(...),
+    expense_proof: Optional[UploadFile] = File(None),
+    db: SessionDep = None
+):
+    try:
+        saved_file_url = None
+
+        # 1. Process and save uploaded file asynchronously
+        if expense_proof and expense_proof.filename:
+            file_extension = os.path.splitext(expense_proof.filename)[1]
+            unique_filename = f"{uuid.uuid4().hex}{file_extension}"
+            file_path = os.path.join(UPLOAD_DIR, unique_filename)
+
+            # Non-blocking async file write
+            async with aiofiles.open(file_path, "wb") as out_file:
+                while content := await expense_proof.read(1024 * 1024):  # Read in 1MB chunks
+                    await out_file.write(content)
+
+            # Public URL path stored in DB
+            #saved_file_url = f"/static/expense_proofs/{unique_filename}"
+            saved_file_url = f"{settings.BASE_URL}/{UPLOAD_DIR}/{unique_filename}"
+
+        # 2. Instantiate Pydantic / SQLModel Create Schema
+        expense_in = ProjectExpenseCreate(
+            project_id=project_id,
+            expense_type=expense_type,
+            expense_value=expense_value,
+            expense_description=expense_description,
+            expense_proof=saved_file_url
+        )
+
+        # 3. Call CRUD function with Pydantic object
+        addexpenses = crud.create_project_expense(
+            session=db, expense_in=expense_in
+        )
+
+        return {
+            "status": 200,
+            "message": "Expense added successfully",
+            "data": addexpenses
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+            detail=str(e)
+        )
+
+# Create uploads directory
+UPLOAD_DIR = "uploads/site_media"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# Serve uploaded static files publicly
+app.mount("/static/site_media", StaticFiles(directory=UPLOAD_DIR), name="site_media")
+
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/webp"}
+ALLOWED_VIDEO_TYPES = {"video/mp4", "video/webm", "video/quicktime"}
+
+@app.post("/api/admin/projects-media", tags=["projects"], status_code=status.HTTP_201_CREATED)
+async def upload_site_media(
+    project_id: str = Form(...),
+    files: list[UploadFile] = File(...),
+    db: SessionDep = None
+):
+    try:
+        uploaded_records = []
+
+        for file in files:
+            file_extension = os.path.splitext(file.filename)[1]
+            unique_filename = f"{uuid.uuid4().hex}{file_extension}"
+            file_path = os.path.join(UPLOAD_DIR, unique_filename)
+
+            # Write file asynchronously
+            async with aiofiles.open(file_path, "wb") as out_file:
+                while chunk := await file.read(1024 * 1024):
+                    await out_file.write(chunk)
+
+            # Public static path to store in database
+            # public_path = f"/static/site_media/{unique_filename}"
+            public_path = f"{settings.BASE_URL}/{UPLOAD_DIR}/{unique_filename}"
+
+            # Instantiate ProjectImageCreate schema
+            image_in = ProjectImageCreate(
+                project_id=project_id,
+                image_path=public_path,  # 👈 Key must be 'image_path'
+                is_thumbnail=False
+            )
+
+            # Call your CRUD function
+            db_obj = crud.create_project_image(session=db, image_in=image_in)
+            uploaded_records.append(db_obj)
+
+        return {
+            "status": 201,
+            "message": f"Successfully uploaded {len(uploaded_records)} file(s)",
+            "data": uploaded_records
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/admin/next-project-id", tags=["projects"])
+def preview_next_project_id(db: SessionDep):
+    """
+    Endpoint for frontend to fetch the next auto-incremented Project ID.
+    """
+    next_id = crud.generate_next_project_id(session=db, prefix="PRJ")
+    
+    encrypted_data = security.encrypt_form_data({"next_project_id": next_id})
+    if not encrypted_data:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed."
+        )
+        
+    return {
+        "status": 200,
+        "message": "Next Project ID fetched successfully",
+        "data": encrypted_data
+    }
+
+
+
+@app.get("/api/admin/fulldetails/{project_id}",response_model=ProjectFullDetailsPublic,tags=["Projects"],summary="Get complete project details with all relationships")
+def get_project_full_details_route(
+    project_id: str,
+    request: Request,
+    session: SessionDep
+):
+    project = crud.get_project_full_details_by_id(session=session, project_identifier=project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    # Map project_employees to include employee profile details
+    project_dict = project.model_dump()
+    project_dict["client_employee"] = project.client_employee
+    project_dict["quotation"] = project.quotation
+    project_dict["expenses"] = project.expenses
+    project_dict["images"] = project.images
+    
+    # Enrich junction table records with actual User details
+    project_dict["project_employees"] = [
+        {
+            "id": pe.id,
+            "client_employee_id": pe.client_employee_id,
+            "accepted_at": pe.accepted_at,
+            "created_at": pe.created_at,
+            "employee_details": pe.client_employee
+        }
+        for pe in project.project_employees
+    ]
+    
+    return project_dict
+
+# ==========================================
+# EMPLOYEE
+# ==========================================
+
+@app.get("/api/admin/employee/{client_employee_id}",response_model=UserWithEmployeeDataPublic,tags=["Employee"],summary="Get employee details by client_employee_id",)
+def get_employee_by_id_route(
+    client_employee_id: str,
+    session: SessionDep,
+    current_user: CurrentUser,
+):
+    employee = crud.get_employee_by_client_employee_id(
+        session=session, client_employee_id=client_employee_id
+    )
+    if not employee:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Employee with ID '{client_employee_id}' not found.",
+        )
+
+    encrypted_data = security.encrypt_form_data(employee)
+    if not encrypted_data:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed."
+        )
+
+    return {
+            "status": 200,
+            "message": "Employee details fetched successfully",
+            "data": encrypted_data
+        }
+
+
+@app.get("/api/admin/employees",response_model=dict,tags=["Employee"],summary="Get all employees with their details and assigned projects",)
+def get_all_employees_route(
+    db: SessionDep,
+    current_user: CurrentUser,
+    skip: int = 0,
+    limit: int = 100,
+):
+    # Fetch employees along with employee_data and project_employees
+    employees = crud.get_all_employees_with_details(session=db, skip=skip, limit=limit)
+
+    # Serialize nested relationships cleanly
+    json_safe_data = jsonable_encoder(employees)
+
+    # Encrypt serialized payload
+    encrypted_data = security.encrypt_form_data(json_safe_data)
+    if not encrypted_data:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed.",
+        )
+    
+    return {
+        "status": 200,
+        "message": f"Employee details fetched successfully",
+        "data": encrypted_data,
+    }
+
+# ==========================================
+# BILLS
+# ==========================================
+
+@app.get("/api/admin/nextbillref", tags=["Bills"])
+def preview_next_reference_number(db: SessionDep):
+    """
+    Endpoint for Angular to fetch the next preview reference number.
+    """
+    next_ref = generate_invoice_ref(db)
+
+    encrypted_data = security.encrypt_form_data(next_ref)
+    if not encrypted_data:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed."
+        )
+    
+    return {
+        "status": 200,
+        "message": "Refrence Fetched",
+        "data": encrypted_data
+    }
+
+@app.post("/api/admin/bills",response_model=dict,tags=["Bills"],summary="Create a new bill with items",)
+def create_bill_route(
+    bill_data: EncryptedFormEnvelope,
+    session: SessionDep,
+    current_user: CurrentUser,
+):
+    decrypted_data = security.decrypt_form_data(bill_data.model_dump())
+    if not decrypted_data:
+        raise HTTPException(
+            status_code=400, 
+            detail="Security verification failed. Invalid encryption envelope."
+        )
+    try:
+        new_bill = crud.create_bill_with_items(session=session, bill_data=decrypted_data)
+        
+        json_safe_data = jsonable_encoder(new_bill)
+        encrypted_data = security.encrypt_form_data(json_safe_data)
+
+        return {
+            "status": 200,
+            "message": "Bill created successfully",
+            "data": encrypted_data,
+        }
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create bill: {str(e)}",
+        )
+
+
+@app.get("/api/admin/bills",response_model=dict,tags=["Bills"],summary="Get all bills with line items",)
+def get_all_bills_route(
+    session: SessionDep,
+    current_user: CurrentUser,
+    skip: int = 0,
+    limit: int = 100,
+):
+    """
+    Fetch a list of all bills including their nested line item details.
+    """
+    bills = crud.get_all_bills(session=session, skip=skip, limit=limit)
+
+    # 1. Convert SQLModel instances to JSON-compatible data structures
+    json_safe_data = jsonable_encoder(bills)
+
+    # 2. Encrypt the response payload
+    encrypted_payload = security.encrypt_form_data(json_safe_data)
+
+    if not encrypted_payload:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed."
+        )
+
+    # 3. Return envelope format
+    return {
+        "status": 200,
+        "message": "Bills fetched successfully",
+        "data": encrypted_payload
+    }
+
+
+@app.get(
+    "/api/admin/bills/{bill_refrence_number}",
+    response_model=dict,
+    tags=["Bills"],
+    summary="Get single bill details by reference number",
+)
+def get_single_bill_route(
+    bill_refrence_number: str,
+    session: SessionDep,
+    current_user: CurrentUser,
+):
+    # 1. Convert URL parameter back to standard slash format
+    formatted_ref_no = bill_refrence_number.replace("_", "/")
+
+    # 2. Query Bill
+    bill = crud.get_bill_by_reference(
+        session=session, bill_refrence_number=formatted_ref_no
+    )
+
+    if not bill:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Bill '{formatted_ref_no}' not found."
+        )
+
+    # 3. Explicitly build the response dictionary with populated items
+    items_list = []
+    for item in bill.items:
+        item_dict = item.model_dump(by_alias=True) if hasattr(item, "model_dump") else item.dict(by_alias=True)
+        items_list.append(item_dict)
+
+    bill_dict = bill.model_dump() if hasattr(bill, "model_dump") else bill.dict()
+    bill_dict["items"] = items_list
+
+    # Print log to terminal to confirm items are attached before encryption
+    print("DEBUG - Items fetched from DB count:", len(bill_dict["items"]))
+
+    # 4. JSON Encode and Encrypt
+    json_safe_data = jsonable_encoder(bill_dict)
+    encrypted_payload = security.encrypt_form_data(json_safe_data)
+
+    return {
+        "status": 200,
+        "message": "Bill details fetched successfully",
+        "data": encrypted_payload
+    }
