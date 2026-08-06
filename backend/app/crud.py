@@ -20,12 +20,16 @@ from app.models import (
     EmployeeDataCreate,
     Bill,
     BillItem,
-    FullEmployeeCreate
+    FullEmployeeCreate,
+    QuotationRequestStatusUpdate,
+    UpdateUser
 )
 
 from sqlmodel import Session, select, or_
 from sqlalchemy.orm import selectinload
 from app.models import Project, ProjectEmployee
+from fastapi import HTTPException, status
+from app.models import User, QuotationRequest
 
 def create_user(*, session: Session, user_create: UserCreate) -> User:
     db_obj = User.model_validate(
@@ -36,6 +40,13 @@ def create_user(*, session: Session, user_create: UserCreate) -> User:
     session.refresh(db_obj)
     return db_obj
 
+def get_user_by_email_and_role(session: Session, email: str, role: str):
+    return session.exec(
+        select(User).where(
+            User.email == email,
+            User.role == role
+        )
+    ).first()
 
 def update_user(*, session: Session, db_user: User, user_in: UserUpdate) -> Any:
     user_data = user_in.model_dump(exclude_unset=True)
@@ -49,6 +60,36 @@ def update_user(*, session: Session, db_user: User, user_in: UserUpdate) -> Any:
     session.commit()
     session.refresh(db_user)
     return db_user
+
+def get_user_by_client_employee_id(session: Session, client_employee_id: str) -> Optional[User]:
+    statement = select(User).where(User.client_employee_id == client_employee_id)
+    return session.exec(statement).first()
+
+def update_user_by_client_employee_id(
+    session: Session, 
+    client_employee_id: str, 
+    user_update: UpdateUser
+) -> User:
+    # 1. Check if user exists
+    user = get_user_by_client_employee_id(session, client_employee_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with client_employee_id '{client_employee_id}' not found."
+        )
+
+    # 2. Extract only fields that were explicitly set in payload
+    update_data = user_update.model_dump(exclude_unset=True)
+
+    # 3. Update existing user attributes
+    for key, value in update_data.items():
+        setattr(user, key, value)
+
+    # 4. Commit and refresh
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return user
 
 
 def get_user_by_email(*, session: Session, email: str) -> User | None:
@@ -306,9 +347,47 @@ def get_quotation_request(
 ) -> list[QuotationRequest]:
     
     statement = select(QuotationRequest)        
-    statement = statement.offset(skip).limit(limit)
+    statement = statement.offset(skip).limit(limit).where(QuotationRequest.status == "pending")
     return session.exec(statement).all()
 
+def get_quotation_request_by_id(session: Session, request_id: int) -> Optional[QuotationRequest]:
+    statement = select(QuotationRequest).where(QuotationRequest.id == request_id)
+    return session.exec(statement).first()
+
+def update_quotation_status_and_admin(
+    session: Session, 
+    quote_id: int, 
+    update_data: QuotationRequestStatusUpdate
+) -> QuotationRequest:
+    quote = session.get(QuotationRequest, quote_id)
+    if not quote:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Quotation request with ID {quote_id} not found."
+        )
+
+    # Only update status
+    if update_data.status is not None:
+        quote.status = update_data.status
+
+    session.add(quote)
+    session.commit()
+    session.refresh(quote)
+    return quote
+
+# --- DELETE ---
+def delete_quotation_request(
+    session: Session, 
+    quote_id: int
+) -> bool:
+    """Delete a quotation request record by ID."""
+    quote = session.get(QuotationRequest, quote_id)
+    if not quote:
+        return False
+
+    session.delete(quote)
+    session.commit()
+    return True
 
 # ==========================================
 # PROJECT CRUD OPERATIONS

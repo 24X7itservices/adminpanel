@@ -7,6 +7,7 @@ from pydantic import EmailStr
 from sqlmodel import Field, Relationship, SQLModel
 from sqlalchemy import DateTime, UniqueConstraint
 from pydantic import field_validator
+from enum import Enum
 
 
 def get_datetime_utc() -> datetime:
@@ -49,6 +50,16 @@ class UserUpdate(UserBase):
     email: Optional[EmailStr] = Field(default=None, max_length=255)  # type: ignore
     password: Optional[str] = Field(default=None, min_length=8, max_length=128)
 
+class UpdateUser(BaseModel):
+    full_name: Optional[str] = None
+    email: Optional[EmailStr] = None
+    phone: Optional[str] = None
+    district: Optional[str] = None
+    state: Optional[str] = None
+    pincode: Optional[str] = None
+    address: Optional[str] = None
+    organisation_name: Optional[str] = None
+    is_active: Optional[bool] = None
 
 class UserUpdateMe(SQLModel):
     name: Optional[str] = Field(default=None, max_length=255)
@@ -58,6 +69,9 @@ class UserUpdateMe(SQLModel):
 class UpdatePassword(SQLModel):
     current_password: str = Field(min_length=8, max_length=128)
     new_password: str = Field(min_length=8, max_length=128)
+
+class UserRead(UserBase):
+    id: int
 
 
 class User(UserBase, table=True):
@@ -70,7 +84,7 @@ class User(UserBase, table=True):
         sa_type=DateTime(timezone=True),
     )
 
-    managed_projects: List[Project] = Relationship(
+    managed_projects: List["Project"] = Relationship(
         sa_relationship_kwargs={
             "primaryjoin": "User.client_employee_id == Project.client_employee_id"
         },
@@ -85,26 +99,25 @@ class User(UserBase, table=True):
         sa_relationship_kwargs={"overlaps": "managed_projects"},
     )
 
-    project_employees: List[ProjectEmployee] = Relationship(
+    project_employees: List["ProjectEmployee"] = Relationship(
         sa_relationship_kwargs={
             "primaryjoin": "User.client_employee_id == ProjectEmployee.client_employee_id"
         },
         back_populates="client_employee",
     )
 
-    employee_data: Optional[EmployeeData] = Relationship(
+    employee_data: Optional["EmployeeData"] = Relationship(
         sa_relationship_kwargs={
             "primaryjoin": "User.client_employee_id == EmployeeData.client_employee_id",
             "uselist": False,
         },
         back_populates="user",
     )
-    
 
 class UserWithEmployeeDataPublic(UserBase):
     id: int
     created_at: Optional[datetime] = None
-    employee_data: Optional[EmployeeDataPublic] = None
+    employee_data: Optional["EmployeeDataPublic"] = None
 
 class UserPublic(UserBase):
     id: int
@@ -261,14 +274,15 @@ class ContactFormPublic(SQLModel):
     id: int
     created_at: Optional[datetime] = None
 
+class QuotationStatus(str, Enum):
+    PENDING = "pending"
+    VIEWED = "viewed"
+    CANCELLED= "cancelled"
 
 class QuotationRequest(SQLModel, table=True):
     __tablename__ = "quotation_requests"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    customer_id: Optional[int] = Field(
-        default=None, foreign_key="users.id", nullable=True
-    )
     full_name: str = Field(max_length=255, nullable=False)
     email: str = Field(max_length=255, nullable=False)
     phone: str = Field(max_length=50, nullable=False)
@@ -276,12 +290,13 @@ class QuotationRequest(SQLModel, table=True):
     installation_address: str = Field(nullable=False)
     description: str = Field(nullable=False)
     status: Optional[str] = Field(default="pending", max_length=50)
-    assigned_admin_id: Optional[int] = Field(
-        default=None, foreign_key="users.id", nullable=True
-    )
     created_at: Optional[datetime] = Field(
         default_factory=get_datetime_utc, nullable=True
     )
+
+class QuotationRequestStatusUpdate(BaseModel):
+    status: Optional[str] = "viewed"
+    assigned_admin_id: Optional[int] = None
 
 
 class QuotationRequestPublic(SQLModel):
@@ -298,8 +313,8 @@ class QuotationEmailRequest(SQLModel):
 
 
 class TempCredentialsEmailRequest(SQLModel):
-    client_email: EmailStr
-    client_name: str
+    email: EmailStr
+    name: str
     temp_password: str
     login_link: str
 
@@ -342,7 +357,13 @@ class ProjectEmployee(ProjectEmployeeBase, table=True):
         back_populates="project_employees",
     )
 
-    project: Optional[Project] = Relationship(
+    # project: Optional["Project"] = Relationship(
+    #     sa_relationship_kwargs={
+    #         "primaryjoin": "ProjectEmployee.project_id == Project.project_id"
+    #     },
+    #     back_populates="project_employees",
+    # )
+    project: Optional["Project"] = Relationship(
         sa_relationship_kwargs={
             "primaryjoin": "ProjectEmployee.project_id == Project.project_id"
         },
@@ -365,7 +386,7 @@ class ProjectEmployeeDetailPublic(SQLModel):
     client_employee_id: str
     accepted_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
-    employee_details: Optional[UserPublicMinimal] = None
+    employee_details: Optional["UserPublicMinimal"] = None
 
 
 # ==========================================
@@ -394,7 +415,7 @@ class ProjectExpense(ProjectExpenseBase, table=True):
         foreign_key="projects.project_id", ondelete="CASCADE", nullable=False, max_length=100
     )
 
-    project: Optional[Project] = Relationship(back_populates="expenses")
+    project: Optional["Project"] = Relationship(back_populates="expenses")
 
 
 class ProjectExpenseCreate(ProjectExpenseBase):
@@ -427,7 +448,7 @@ class ProjectImage(ProjectImageBase, table=True):
         default_factory=get_datetime_utc, nullable=False
     )
 
-    project: Optional[Project] = Relationship(back_populates="images")
+    project: Optional["Project"] = Relationship(back_populates="images")
 
 
 class ProjectImageCreate(ProjectImageBase):

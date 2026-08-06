@@ -43,7 +43,10 @@ from app.models import (
     ProjectFullDetailsPublic,
     EmployeeData,
     UserWithEmployeeDataPublic,
-    EmployeeDataCreate
+    EmployeeDataCreate,
+    QuotationRequestStatusUpdate,
+    UserRead,
+    UpdateUser
 )
 import uuid
 import aiofiles
@@ -169,51 +172,78 @@ def save_uploaded_file(file: Optional[UploadFile], folder: str) -> Optional[str]
 
 
 @app.post("/api/admin/create_user", tags=["create-user"])
+
 async def create_user_route(
     db: SessionDep,
     current_user: CurrentUser,
-    # Standard Form Fields
+
+    # Common Fields
     role: str = Form(...),
-    employee_email: Optional[str] = Form(None),
-    email: Optional[str] = Form(None),
+    name: str = Form(...),
+    email: str = Form(...),
+    phone: str = Form(...),
+    address: str = Form(...),
+    pincode: str = Form(...),
+    district: str = Form(...),
+    state: str = Form(...),
+    organisation_name: Optional[str] = Form("NA"),
     password: str = Form(...),
-    
-    # Employee Fields
-    employee_name: Optional[str] = Form(None),
-    employee_contactNumber: Optional[str] = Form(None),
-    employee_address: Optional[str] = Form(None),
-    employee_pincode: Optional[str] = Form(None),
-    employee_district: Optional[str] = Form(None),
-    employee_state: Optional[str] = Form(None),
-    
-    # Bank Details
+
+    # Employee-only Bank Details
     employee_bankname: Optional[str] = Form(None),
     employee_account_name: Optional[str] = Form(None),
-    employee_ifsecode: Optional[str] = Form(None),  # Accepts "employee_ifsecode" from payload
+    employee_ifsecode: Optional[str] = Form(None),
     employee_account_number: Optional[str] = Form(None),
-    
-    # Binary Upload File Handlers (Must be UploadFile, NOT bytes!)
+
+    # Employee-only Documents
     aadhar_card: Optional[UploadFile] = File(None),
     pan_card: Optional[UploadFile] = File(None),
     dl: Optional[UploadFile] = File(None),
 ):
+# async def create_user_route(
+#     db: SessionDep,
+#     current_user: CurrentUser,
+#     # Standard Form Fields
+#     role: str = Form(...),
+#     employee_email: Optional[str] = Form(None),
+#     email: Optional[str] = Form(None),
+#     password: str = Form(...),
+    
+#     # Employee Fields
+#     employee_name: Optional[str] = Form(None),
+#     employee_contactNumber: Optional[str] = Form(None),
+#     employee_address: Optional[str] = Form(None),
+#     employee_pincode: Optional[str] = Form(None),
+#     employee_district: Optional[str] = Form(None),
+#     employee_state: Optional[str] = Form(None),
+    
+#     # Bank Details
+#     employee_bankname: Optional[str] = Form(None),
+#     employee_account_name: Optional[str] = Form(None),
+#     employee_ifsecode: Optional[str] = Form(None),  # Accepts "employee_ifsecode" from payload
+#     employee_account_number: Optional[str] = Form(None),
+    
+#     # Binary Upload File Handlers (Must be UploadFile, NOT bytes!)
+#     aadhar_card: Optional[UploadFile] = File(None),
+#     pan_card: Optional[UploadFile] = File(None),
+#     dl: Optional[UploadFile] = File(None),
+# ):
     # Determine the target email
-    user_email = email if role == "client" else employee_email
-    if not user_email:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email address is required."
-        )
 
     # 1. Check duplicate user
-    existing_user = crud.get_user_by_email(session=db, email=user_email)
+    existing_user = crud.get_user_by_email_and_role(
+        session=db,
+        email=email,
+        role=role
+    )
+
     if existing_user:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User with this email already exists in the system."
+            status_code=400,
+            detail=f"A {role} with this email already exists."
         )
+    
 
-    # 2. Generate Next Employee ID
     if role == "employee":
         next_emp_id = crud.generate_next_employee_id(session=db, prefix="EMP", padding=4)
     elif role == "client":
@@ -234,15 +264,15 @@ async def create_user_route(
 
         # Create Primary User
         user_in = UserCreate(
-            name=employee_name,
-            email=user_email,
-            phone=employee_contactNumber,
+            name=name,
+            email=email,
+            phone=phone,
             role=role,
-            address=employee_address,
+            address=address,
             client_employee_id=next_emp_id,
-            pincode=employee_pincode,
-            district=employee_district,
-            state=employee_state,
+            pincode=pincode,
+            district=district,
+            state=state,
             password=password,
             organisation_name="NA",
             terms_and_condition=True,
@@ -270,6 +300,32 @@ async def create_user_route(
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to record employee data: {str(e)}"
+            )
+
+        return {"status": 200, "message": "User created successfully"}
+
+    if role =="client" :
+        user_in = UserCreate(
+            name=name,
+            email=email,
+            phone=phone,
+            role=role,
+            address=address,
+            client_employee_id=next_emp_id,
+            pincode=pincode,
+            district=district,
+            state=state,
+            password=password,
+            organisation_name=organisation_name,
+            terms_and_condition=True,
+        )
+        
+        try:
+           new_user =  crud.create_user(session=db, user_create=user_in)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to record client data: {str(e)}"
             )
 
         return {"status": 200, "message": "User created successfully"}
@@ -328,6 +384,59 @@ async def get_users_route(
         "data": encrypted_data
     }
 
+@app.get("/api/admin/usersbyid/{client_employee_id}",tags=["Users"], status_code=status.HTTP_200_OK)
+def read_user_by_employee_id(
+    client_employee_id: str, 
+    db: SessionDep,
+):
+    user = crud.get_user_by_client_employee_id(
+        session=db, 
+        client_employee_id=client_employee_id
+    )
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User with client_employee_id '{client_employee_id}' not found."
+        )
+    encrypted_data = security.encrypt_form_data(jsonable_encoder(user))
+
+    if not encrypted_data:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed."
+        )
+        
+    return {
+        "status": 200,
+        "message": "Record Fetched",
+        "data": encrypted_data
+    }
+
+@app.patch("/api/admin/updateusersbyid/{client_employee_id}",tags=["Users"],status_code=status.HTTP_200_OK,)
+def update_user_by_employee_id(
+    client_employee_id: str,
+    payload: UpdateUser,
+    db: SessionDep,
+):
+    updated_user = crud.update_user_by_client_employee_id(
+        session=db,
+        client_employee_id=client_employee_id,
+        user_update=payload
+    )
+    user_dict = jsonable_encoder(updated_user)
+    encrypted_data = security.encrypt_form_data(user_dict)
+    if not encrypted_data:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed."
+        )
+
+    return {
+        "status": 200,
+        "message": "User updated successfully.",
+        "data": encrypted_data
+    }
 
 class EncryptedFormEnvelope(BaseModel):
     formData: dict
@@ -675,6 +784,66 @@ def get_all_quotations_request(
     }
     return contactform
 
+@app.get("/api/admin/quotation-request/{request_id}", tags=["quotation-request"])
+def get_quotation_request_by_id_route(
+    request_id: int,
+    db: SessionDep
+):
+    # 1. Fetch single quotation request from CRUD
+    quotation_request = crud.get_quotation_request_by_id(session=db, request_id=request_id)
+    
+    if not quotation_request:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Quotation request with ID {request_id} not found."
+        )
+
+    # 2. Encode to JSON-compatible dictionary
+    quotation_request_dict = jsonable_encoder(quotation_request)
+
+    # 3. Encrypt outbound data for Angular
+    encrypted_data = security.encrypt_form_data(quotation_request_dict)
+    if not encrypted_data:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed."
+        )
+
+    # 4. Return response envelope
+    return {
+        "status": 200,
+        "message": "Quotation Request retrieved successfully",
+        "data": encrypted_data
+    }
+
+@app.patch("/api/admin/quotationupdate/{quote_id}", tags=["quotation-request"],status_code=status.HTTP_200_OK)
+def update_quotation_status_route(
+    quote_id: int,
+    payload: QuotationRequestStatusUpdate,
+    db: SessionDep,
+):
+    # 1. Update quotation in DB safely
+    updated_quote = crud.update_quotation_status_and_admin(
+        session=db, quote_id=quote_id, update_data=payload
+    )
+
+    # 2. Encode to dict
+    quote_dict = jsonable_encoder(updated_quote)
+
+    # 3. Encrypt for Angular frontend
+    encrypted_data = security.encrypt_form_data(quote_dict)
+    if not encrypted_data:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed.",
+        )
+
+    return {
+        "status": 200,
+        "message": "Quotation request updated successfully.",
+        "data": encrypted_data,
+    }
+
 PDF_STORAGE_DIR = "quotations"
 os.makedirs(PDF_STORAGE_DIR, exist_ok=True)
 
@@ -697,8 +866,8 @@ def send_temporary_credentials_endpoint(payload: TempCredentialsEmailRequest):
     try:
         # Call the utility function using the alias
         send_email_util(
-            client_email=payload.client_email,
-            client_name=payload.client_name,
+            email=payload.email,
+            name=payload.name,
             temp_password=payload.temp_password,
             login_link=payload.login_link,
         )

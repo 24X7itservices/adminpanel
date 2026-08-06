@@ -170,15 +170,15 @@ def send_quotation_email(
 
 
 def send_temporary_credentials_email(
-    *, client_email: str, client_name: str, temp_password: str, login_link: str
+    *, email: str, name: str, temp_password: str, login_link: str
 ) -> None:
     template_path = Path(settings.EMAIL_TEMPLATES_DIR) / "temporary_credentials.html"
     template_str = template_path.read_text(encoding="utf-8")
     
     html_content = Template(template_str).render(
         project_name=settings.PROJECT_NAME,
-        client_name=client_name,
-        client_email=client_email,
+        name=name,
+        email=email,
         temp_password=temp_password,
         login_link=login_link,
     )
@@ -186,7 +186,7 @@ def send_temporary_credentials_email(
     message = MIMEMultipart("alternative")
     message["Subject"] = f"Your Temporary Login Credentials - {settings.PROJECT_NAME}"
     message["From"] = f"{settings.EMAILS_FROM_NAME} <{settings.EMAILS_FROM_EMAIL}>"
-    message["To"] = client_email
+    message["To"] = email
     
     message.attach(MIMEText(html_content, "html"))
     
@@ -201,7 +201,7 @@ def send_temporary_credentials_email(
         if settings.SMTP_USER and settings.SMTP_PASSWORD:
             server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
             
-        server.sendmail(settings.EMAILS_FROM_EMAIL, client_email, message.as_string())
+        server.sendmail(settings.EMAILS_FROM_EMAIL, email, message.as_string())
         server.quit()
     except Exception as e:
         raise ValueError(f"Failed to send email: {str(e)}")
