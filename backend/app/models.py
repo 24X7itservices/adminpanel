@@ -491,8 +491,14 @@ class ProjectImagePublic(ProjectImageBase):
 # 5. PROJECT DOCUMENTS, PAYMENTS & FOLLOWUPS
 # ==========================================
 class ProjectDocumentBase(SQLModel):
-    document_text: str = Field(max_length=255)
-    document_url: str = Field(max_length=255)
+    project_id: str = Field(
+        foreign_key="projects.project_id",
+        ondelete="CASCADE",
+        nullable=False,
+        max_length=255,
+    )
+    document_text: Optional[str] = Field(default=None)
+    document_url: str = Field(nullable=False, max_length=2083)
 
 
 class ProjectDocument(ProjectDocumentBase, table=True):
@@ -501,6 +507,9 @@ class ProjectDocument(ProjectDocumentBase, table=True):
     project_id: str = Field(
         foreign_key="projects.project_id", ondelete="CASCADE", nullable=False
     )
+    created_at: Optional[datetime] = Field(
+        default_factory=get_datetime_utc, nullable=True
+    )
     project: Optional["Project"] = Relationship(back_populates="documents")
 
 
@@ -508,6 +517,8 @@ class ProjectDocumentPublic(ProjectDocumentBase):
     id: int
     project_id: str
 
+class ProjectDocumentCreate(ProjectDocumentBase):
+    pass
 
 class ProjectPaymentBase(SQLModel):
     project_id: str = Field(
@@ -526,7 +537,6 @@ class ProjectPaymentBase(SQLModel):
     transaction_type: str = Field(max_length=50)
     transaction_proof: Optional[str] = Field(default=None, max_length=255)
     description: Optional[str] = Field(default=None, max_length=255)
-    transaction_date: Optional[datetime] = Field(default=None, nullable=True)
 
 
 class ProjectPayment(ProjectPaymentBase, table=True):
@@ -536,17 +546,35 @@ class ProjectPayment(ProjectPaymentBase, table=True):
         foreign_key="projects.project_id", ondelete="CASCADE", nullable=False
     )
     project: Optional["Project"] = Relationship(back_populates="payments")
+    transaction_date: Optional[datetime] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+    amount: Decimal
+    transaction_id: Optional[str] = Field(default=None, unique=True)
+    transaction_proof: Optional[str] = None
+    transaction_type: str
+    created_at: Optional[datetime] = Field(default=None)
+    payment_status: str = Field(default="Paid")
+    description: Optional[str] = None
 
 
 class ProjectPaymentPublic(ProjectPaymentBase):
     id: int
     project_id: str
+    amount: float
+    transaction_id: Optional[str] = None
+    transaction_proof: Optional[str] = None
+    transaction_type: str
+    transaction_date: datetime
+    payment_status: str
+    description: Optional[str] = None
 
 class ProjectPaymentCreate(ProjectPaymentBase):
     pass
 
 class ProjectFollowupBase(SQLModel):
-    notes: str = Field(max_length=500)
+    followup_date: date
+    notes: str
+    next_followup_date: Optional[date] = None
 
 
 class ProjectFollowup(ProjectFollowupBase, table=True):
@@ -564,6 +592,8 @@ class ProjectFollowupPublic(ProjectFollowupBase):
     project_id: str
     created_at: Optional[datetime] = None
 
+class ProjectFollowupCreate(ProjectFollowupBase):
+    project_id: str
 
 # ==========================================
 # 6. MAIN PROJECTS TABLE & SCHEMAS
@@ -588,6 +618,8 @@ class ProjectBase(SQLModel):
     project_start_date: Optional[date] = None
     project_end_date: Optional[date] = None
     project_status: str = Field(default="Pending", max_length=50)
+    roundup: Optional[float] = None
+    
 
     @field_validator("project_start_date", "project_end_date", mode="before")
     @classmethod
@@ -609,7 +641,14 @@ class Project(ProjectBase, table=True):
     __tablename__ = "projects"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    roundup: Optional[str] = None
+    project_id: Optional[str] = Field(default=None, unique=True, index=True)
+    client_employee_id: Optional[str] = Field(default=None, foreign_key="users.client_employee_id")
+    quotation_reference_number: Optional[str] = Field(default=None, foreign_key="quotations.quotation_reference_number")
+    project_start_date: Optional[date] = None
+    project_end_date: Optional[date] = None
+    project_status: str = Field(default="Pending")
+    created_at: Optional[datetime] = Field(default=None)
+    roundup: Optional[float] = None
     created_at: Optional[datetime] = Field(
         default_factory=get_datetime_utc, nullable=True
     )
@@ -638,18 +677,43 @@ class Project(ProjectBase, table=True):
         back_populates="project",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
-    payments: List[ProjectPayment] = Relationship(
-        back_populates="project",
-        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
-    )
+    # payments: List[ProjectPayment] = Relationship(
+    #     back_populates="project",
+    #     sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    # )
     followups: List[ProjectFollowup] = Relationship(
         back_populates="project",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
+    # bills: List["Bill"] = Relationship(
+    #     sa_relationship_kwargs={
+    #         "primaryjoin": "Project.quotation_reference_number == Bill.quotation_reference_number",
+    #         "viewonly": True,
+    #         "overlaps": "quotation,projects",
+    #     }
+    # )
+    # Relationships
+    payments: List["ProjectPayment"] = Relationship(
+        back_populates="project",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"}
+    )
 
+    # Wrap foreign() around Bill.quotation_reference_number
+    bills: List["Bill"] = Relationship(
+        sa_relationship_kwargs={
+            "primaryjoin": "Project.quotation_reference_number == foreign(Bill.quotation_reference_number)",
+            "viewonly": True,
+            "overlaps": "quotation,projects",
+        }
+    )
+
+class ProjectResponseWrapper(BaseModel):
+    success: int
+    message: str
+    data: ProjectPublic
 
 class ProjectCreate(ProjectBase):
-    roundup: Optional[str] = None
+    roundup: Optional[float] = None
 
 
 class ProjectUpdate(SQLModel):
@@ -659,12 +723,24 @@ class ProjectUpdate(SQLModel):
     project_start_date: Optional[date] = None
     project_end_date: Optional[date] = None
     project_status: Optional[str] = None
-    roundup: Optional[str] = None
+    roundup: Optional[float] = None
 
 
 class ProjectPublic(ProjectBase):
     id: int
+    project_id: str
+    client_employee_id: Optional[str] = None
+    quotation_reference_number: Optional[str] = None
+    project_start_date: Optional[date] = None
+    project_end_date: Optional[date] = None
+    project_status: str
+    roundup: Optional[float] = None
     created_at: Optional[datetime] = None
+    
+    # Add payments list here
+    payments: List[ProjectPaymentPublic] = []
+
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ProjectPublicWithDetails(ProjectPublic):
@@ -673,7 +749,6 @@ class ProjectPublicWithDetails(ProjectPublic):
     project_employees: List[ProjectEmployeePublic] = Field(
         default_factory=list
     )
-
 
 class ProjectFullDetailsPublic(ProjectPublic):
     client_employee: Optional[UserPublicMinimal] = None
@@ -686,6 +761,38 @@ class ProjectFullDetailsPublic(ProjectPublic):
     project_employees: List[ProjectEmployeeDetailPublic] = Field(
         default_factory=list
     )
+
+class ProjectRoundupUpdate(SQLModel):
+    roundup: float = Field(
+        ...,
+        description="Updated numeric roundup value for the project",
+    )
+
+class ProjectStatusUpdate(SQLModel):
+    project_status: str = Field(
+        ...,
+        max_length=50,
+        description="New status for the project (e.g., Completed, In Progress, On Hold)",
+    )
+    project_end_date: Optional[date] = Field(
+        default=None,
+        description="Optional completion date. Defaults to today's date if project_status is 'Completed'",
+    )
+
+    @field_validator("project_end_date", mode="before")
+    @classmethod
+    def parse_flexible_date(cls, value):
+        if isinstance(value, str) and value.strip():
+            value_str = value.strip()
+            for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y"):
+                try:
+                    return datetime.strptime(value_str, fmt).date()
+                except ValueError:
+                    continue
+            raise ValueError(
+                f"Invalid date format '{value}'. Expected YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YYYY."
+            )
+        return value
 # ==========================================
 # EMPLOYEE DATA MODELS
 # ==========================================
@@ -757,7 +864,12 @@ class BillItem(BillItemBase, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
-
+    bill_refrence_number: str = Field(foreign_key="bills.bill_refrence_number")
+    name: str
+    hsn: str
+    quantity: int = Field(default=0)
+    unit: str
+    price_per_unit: Decimal = Field(default=Decimal("0.00"))
     bill: Optional["Bill"] = Relationship(
         sa_relationship_kwargs={
             "primaryjoin": "foreign(BillItem.bill_refrence_number) == Bill.bill_refrence_number"
@@ -766,10 +878,56 @@ class BillItem(BillItemBase, table=True):
     )
 
 
-class BillItemPublic(BillItemBase):
+class BillItemPublic(BaseModel):
     id: int
+    bill_refrence_number: str
+    name: str
+    hsn: str
+    quantity: int
+    unit: str
+    price_per_unit: float
     created_at: Optional[datetime] = None
 
+class ClientDetailsPublic(BaseModel):
+    id: int
+    client_employee_id: str
+    name: str
+    email: str
+    phone: str
+    role: str
+    is_active: bool
+    district: Optional[str] = None
+    state: Optional[str] = None
+    address: Optional[str] = None
+    pincode: Optional[str] = None
+    created_at: Optional[datetime] = None
+    organisation_name: Optional[str] = None
+
+
+class BillFullResponse(BaseModel):
+    id: int
+    bill_refrence_number: str
+    quotation_reference_number: Optional[str] = None
+    client_employee_id: Optional[str] = None
+    total_amount: float
+    status: str
+    created_at: Optional[datetime] = None
+    url_call: Optional[str] = None
+    place_of_supply: Optional[str] = None
+
+    items: List[BillItemPublic] = []
+    # Maps 'client' relationship from DB model to 'clientDetails' in JSON response
+    client_details: Optional[ClientDetailsPublic] = Field(
+        default=None, 
+        alias="client", 
+        serialization_alias="clientDetails"
+    )
+    projects: List[ProjectPublic] = []
+
+    # Use model_config ONLY (remove 'class Config:')
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+   
 
 # ==========================================
 # 2. BILL MODEL
@@ -803,12 +961,29 @@ class Bill(SQLModel, table=True):
     place_of_supply: str = Field(max_length=100, unique=True, index=True)
 
     # Note lazy="selectin" forces eager loading of items on every query
-    items: List[BillItem] = Relationship(
-        sa_relationship_kwargs={
-            "primaryjoin": "Bill.bill_refrence_number == foreign(BillItem.bill_refrence_number)",
-            "lazy": "selectin"
-        },
+    items: List["BillItem"] = Relationship(
         back_populates="bill",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"}
+    )
+
+    # Wrap foreign() around Project.quotation_reference_number
+    projects: List["Project"] = Relationship(
+        sa_relationship_kwargs={
+            "primaryjoin": "Bill.quotation_reference_number == foreign(Project.quotation_reference_number)",
+            "viewonly": True,
+            "overlaps": "quotation,projects,bills",
+        }
+    )
+
+    client_employee_id: Optional[str] = Field(
+        default=None, foreign_key="users.client_employee_id"
+    )
+
+    # Relationship to User
+    client: Optional["User"] = Relationship(
+        sa_relationship_kwargs={
+            "primaryjoin": "Bill.client_employee_id == User.client_employee_id"
+        }
     )
 
 

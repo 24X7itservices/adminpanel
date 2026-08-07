@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
-from sqlmodel import Session, select
-from app.models import Quotation, Bill, BillItem
+from sqlmodel import Session, select, func
+from app.models import Quotation, Bill, BillItem,Project
 
 
 def get_current_financial_year() -> str:
@@ -65,3 +65,8 @@ def generate_invoice_ref(db: Session, prefix: str = "ITS/INV") -> str:
 
     formatted_seq = f"{next_seq:03d}"
     return f"{prefix}/{fy_str}/{formatted_seq}"
+
+def generate_project_id(db: Session) -> str:
+    total_rows = db.exec(select(func.count()).select_from(Project)).one()
+    next_id = total_rows + 1
+    return f"PRJ{next_id:04d}"

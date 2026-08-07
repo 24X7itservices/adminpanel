@@ -1,7 +1,7 @@
 import re
 from typing import Any, Optional, Tuple, List, Dict
 from sqlmodel import Session, func, select
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, joinedload
 from app.core.security import SecurityService
 from app.models import User, UserCreate, UserUpdate
 from app.models import Quotation, QuotationProduct, QuotationCreateRequest
@@ -24,10 +24,16 @@ from app.models import (
     QuotationRequestStatusUpdate,
     UpdateUser,
     ProjectPaymentCreate,
-    ProjectPayment
+    ProjectPayment,
+    ProjectRoundupUpdate,
+    ProjectDocumentCreate,
+    ProjectDocument,
+    ProjectFollowup,
+    ProjectFollowupCreate,
+    ProjectStatusUpdate,
 
 )
-
+from datetime import date
 from sqlmodel import Session, select, or_
 from sqlalchemy.orm import selectinload
 from app.models import Project, ProjectEmployee
@@ -468,14 +474,20 @@ def get_projects(
 def create_project(
     db: Session, project_create: ProjectCreate
 ) -> Project:
-    db_project = Project.model_validate(project_create)
+    # Convert incoming schema to dictionary and pass as kwargs
+    project_data = project_create.model_dump(exclude_unset=True)
+    db_project = Project(**project_data)
+    
+    if not db_project.project_status:
+        db_project.project_status = "Pending"
+
     db.add(db_project)
     db.commit()
     db.refresh(db_project)
     return db_project
 
 def update_project(
-    db: Session, project_db_id: int, project_update: ProjectUpdate
+    db: Session, project_db_id: str, project_update: ProjectUpdate
 ) -> Optional[Project]:
     db_project = get_project_by_id(db, project_db_id)
     if not db_project:
@@ -505,6 +517,76 @@ def create_project_payment(
     session.commit()
     session.refresh(db_obj)
     return db_obj
+
+def create_project_document(
+    session: Session, document_in: ProjectDocumentCreate
+) -> ProjectDocument:
+    db_obj = ProjectDocument.model_validate(document_in)
+    session.add(db_obj)
+    session.commit()
+    session.refresh(db_obj)
+    return db_obj
+
+def create_project_followup(
+    session: Session, followup_in: ProjectFollowupCreate
+) -> ProjectFollowup:
+    db_obj = ProjectFollowup.model_validate(followup_in)
+    session.add(db_obj)
+    session.commit()
+    session.refresh(db_obj)
+    return db_obj
+
+def get_project_by_str_id(
+    session: Session, project_id: str
+) -> Optional[Project]:
+    statement = select(Project).where(
+        Project.project_id == project_id
+    )
+    return session.exec(statement).first()
+
+def get_project_by_str_id(
+    session: Session, project_id: str
+) -> Optional[Project]:
+    statement = select(Project).where(
+        Project.project_id == project_id
+    )
+    return session.exec(statement).first()
+
+
+def update_project_status(
+    session: Session,
+    project_id: str,
+    status_data: ProjectStatusUpdate,
+) -> Optional[Project]:
+    db_project = get_project_by_str_id(session, project_id)
+    if not db_project:
+        return None
+
+    db_project.project_status = status_data.project_status.strip()
+
+    # Automatically set project_end_date if status is "Completed"
+    if status_data.project_status.strip().lower() == "completed":
+        db_project.project_end_date = (
+            status_data.project_end_date or date.today()
+        )
+
+    session.add(db_project)
+    session.commit()
+    session.refresh(db_project)
+    return db_project
+
+def update_project_roundup(
+    session: Session, project_id: str, roundup_data: ProjectRoundupUpdate
+) -> Optional[Project]:
+    db_project = get_project_by_str_id(session, project_id)
+    if not db_project:
+        return None
+
+    db_project.roundup = roundup_data.roundup
+    session.add(db_project)
+    session.commit()
+    session.refresh(db_project)
+    return db_project
 
 # ==========================================
 # PROJECT EMPLOYEES CRUD
@@ -718,7 +800,10 @@ def get_bill_by_reference(
     statement = (
         select(Bill)
         .where(Bill.bill_refrence_number == bill_refrence_number)
-        .options(selectinload(Bill.items))
+        .options(
+            selectinload(Bill.items),
+            selectinload(Bill.projects).selectinload(Project.payments)
+            )
     )
     return session.exec(statement).first()
 
@@ -750,4 +835,17 @@ def get_employee_by_client_id(db: Session, client_employee_id: str) -> Optional[
     Fetches the User record along with its related EmployeeData by client_employee_id.
     """
     statement = select(User).where(User.client_employee_id == client_employee_id)
+    return db.exec(statement).first()
+
+def get_bill_by_url_call(db: Session, url_call: str) -> Optional[Bill]:
+    statement = (
+        select(Bill)
+        .where(Bill.url_call == url_call)
+        .options(
+            selectinload(Bill.items),
+            joinedload(Bill.client),
+            # Chain selectinload to load payments inside projects
+            selectinload(Bill.projects).selectinload(Project.payments)
+        )
+    )
     return db.exec(statement).first()

@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from app import crud
 from app.api.main import api_router
 from app.core.security import SecurityService
-from app.core.refrenceNumber import generate_invoice_ref, get_current_financial_year,generate_quotation_ref
+from app.core.refrenceNumber import generate_invoice_ref, get_current_financial_year,generate_quotation_ref,generate_project_id
 from app.models import QuotationStatusUpdate, UserCreate
 from app.models import Quotation, QuotationProduct, QuotationCreateRequest,QuotationReadWithProducts
 from fastapi.encoders import jsonable_encoder
@@ -65,8 +65,14 @@ from app.models import (
     ProjectPayment,
     ProjectFollowupPublic,
     ProjectFollowupBase,
-    ProjectPaymentCreate
-
+    ProjectPaymentCreate,
+    ProjectRoundupUpdate,
+    ProjectDocumentCreate,
+    ProjectFollowupCreate,
+    ProjectStatusUpdate,
+    ProjectResponseWrapper,
+    BillFullResponse,
+    Bill
 
 )
 import uuid
@@ -1216,11 +1222,37 @@ def generate_whatsapp_quotation_pdf(ref_no: str, db: SessionDep):
 # PROJECT
 # ==========================================
 
-@app.post("/api/admin/projects/",response_model=ProjectPublic,status_code=status.HTTP_201_CREATED,tags=["project"])
-def create_project(
-    project: ProjectCreate, db: SessionDep
-):
-    return crud.create_project(db=db, project_create=project)
+@app.post("/api/admin/projects/",response_model=ProjectResponseWrapper,status_code=status.HTTP_201_CREATED,tags=["project"])
+async def create_project(
+    request: Request,
+    payload: EncryptedFormEnvelope,
+    db: SessionDep
+    ):
+    try:
+        project_id = generate_project_id(db)
+        decrypted_data = security.decrypt_form_data(payload.model_dump())
+        if not decrypted_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Security verification failed. Invalid encryption envelope.",
+            )
+        decrypted_data["project_id"] = project_id
+        decrypted_data["roundup"] = 0
+        project_create = ProjectCreate(**decrypted_data)
+        assigned = crud.create_project(
+            db=db, project_create=project_create
+        )
+        return {
+            "success": 201,
+            "message": "Project Created successfully",
+            "data": assigned,
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to create project: {str(e)}",
+        )
 
 
 @app.get("/api/admin/projects/", response_model=List[ProjectPublic],tags=["project"])
@@ -1242,7 +1274,7 @@ def read_project(project_db_id: int, db: SessionDep):
 
 @app.patch("/api/admin/projects/{project_db_id}", response_model=ProjectPublic,tags=["project"])
 def update_project(
-    project_db_id: int,
+    project_db_id: str,
     project: ProjectUpdate,
     db: SessionDep,
 ):
@@ -1253,6 +1285,21 @@ def update_project(
         raise HTTPException(status_code=404, detail="Project not found")
     return updated
 
+@app.patch("/api/admin/projects/updatediscount/{project_id}",response_model=ProjectPublic,status_code=status.HTTP_200_OK,tags=["projects"],)
+def update_project_roundup(
+    project_id: str,
+    roundup_in: ProjectRoundupUpdate,
+    db: SessionDep,
+):
+    updated_project = crud.update_project_roundup(
+        session=db, project_id=project_id, roundup_data=roundup_in
+    )
+    if not updated_project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project '{project_id}' not found.",
+        )
+    return updated_project
 
 @app.delete("/api/admin/projects/{project_db_id}", status_code=status.HTTP_204_NO_CONTENT,tags=["project"])
 def delete_project(project_db_id: int, db: SessionDep):
@@ -1322,6 +1369,83 @@ async def add_project_expense(
             detail=str(e)
         )
 
+UPLOAD_DIR = "uploads/documents"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+@app.post("/api/admin/projects/add-document",response_model=ProjectDocumentPublic,status_code=status.HTTP_201_CREATED,tags=["project"],)
+async def add_project_document(
+    project_id: str = Form(...),
+    document_text: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None),
+    document_url: Optional[str] = Form(None),
+    db: SessionDep = None
+):
+    try:
+        final_document_url = document_url
+
+        # Save binary upload if provided
+        if file and file.filename:
+            file_extension = os.path.splitext(file.filename)[1]
+            unique_filename = f"{uuid.uuid4().hex}{file_extension}"
+            file_path = os.path.join(UPLOAD_DIR, unique_filename)
+
+            async with aiofiles.open(file_path, "wb") as out_file:
+                while content := await file.read(1024 * 1024):
+                    await out_file.write(content)
+            final_document_url = f"{settings.BASE_URL}/{UPLOAD_DIR}/{unique_filename}"
+
+        if not final_document_url:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Either a document file or document_url must be provided.",
+            )
+
+        document_in = ProjectDocumentCreate(
+            project_id=project_id,
+            document_text=document_text,
+            document_url=final_document_url,
+        )
+
+        return crud.create_project_document(session=db, document_in=document_in)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        )
+
+@app.post("/api/admin/projects/add-followup",response_model=ProjectFollowupPublic,tags=["project"],)
+def add_project_followup(
+    followup_in: ProjectFollowupCreate,
+    db: SessionDep = None,
+):
+    try:
+        return crud.create_project_followup(session=db, followup_in=followup_in)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
+
+@app.patch("/api/admin/projects/{project_id}/status",response_model=ProjectPublic,status_code=status.HTTP_200_OK,tags=["project"],
+)
+def change_project_status(
+    project_id: str,
+    status_in: ProjectStatusUpdate,
+    db: SessionDep = None,
+):
+    updated_project = crud.update_project_status(
+        session=db, project_id=project_id, status_data=status_in
+    )
+    if not updated_project:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project '{project_id}' not found.",
+        )
+    return updated_project   
+    
 # Create uploads directory
 UPLOAD_DIR = "uploads/site_media"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -1662,49 +1786,44 @@ def get_all_bills_route(
     }
 
 
-@app.get(
-    "/api/admin/bills/{bill_refrence_number}",
-    response_model=dict,
-    tags=["Bills"],
-    summary="Get single bill details by reference number",
-)
-def get_single_bill_route(
-    bill_refrence_number: str,
-    session: SessionDep,
-    current_user: CurrentUser,
-):
-    # 1. Convert URL parameter back to standard slash format
-    formatted_ref_no = bill_refrence_number.replace("_", "/")
+# @app.get("/api/admin/bills/{bill_refrence_number}",response_model=dict,tags=["Bills"],summary="Get single bill details by reference number",)
+# def get_single_bill_route(
+#     bill_refrence_number: str,
+#     session: SessionDep,
+#     current_user: CurrentUser,
+# ):
+#     formatted_ref_no = bill_refrence_number.replace("_", "/")
+#     bill = crud.get_bill_by_reference(
+#         session=session, bill_refrence_number=formatted_ref_no
+#     )
 
-    # 2. Query Bill
-    bill = crud.get_bill_by_reference(
-        session=session, bill_refrence_number=formatted_ref_no
-    )
+#     if not bill:
+#         raise HTTPException(
+#             status_code=status.HTTP_404_NOT_FOUND,
+#             detail=f"Bill '{formatted_ref_no}' not found."
+#         )
+#     items_list = []
+#     for item in bill.items:
+#         item_dict = item.model_dump(by_alias=True) if hasattr(item, "model_dump") else item.dict(by_alias=True)
+#         items_list.append(item_dict)
 
+#     bill_dict = bill.model_dump() if hasattr(bill, "model_dump") else bill.dict()
+#     bill_dict["items"] = items_list
+#     json_safe_data = jsonable_encoder(bill_dict)
+#     encrypted_payload = security.encrypt_form_data(json_safe_data)
+
+#     return {
+#         "status": 200,
+#         "message": "Bill details fetched successfully",
+#         "data": encrypted_payload
+#     }
+
+@app.get("/api/admin/bills/{url_call}", response_model=BillFullResponse, tags=["bills"])
+def get_bill_by_url_call(url_call: str, db: SessionDep):
+    bill = crud.get_bill_by_url_call(db=db, url_call=url_call)
     if not bill:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Bill '{formatted_ref_no}' not found."
+            detail="Bill not found",
         )
-
-    # 3. Explicitly build the response dictionary with populated items
-    items_list = []
-    for item in bill.items:
-        item_dict = item.model_dump(by_alias=True) if hasattr(item, "model_dump") else item.dict(by_alias=True)
-        items_list.append(item_dict)
-
-    bill_dict = bill.model_dump() if hasattr(bill, "model_dump") else bill.dict()
-    bill_dict["items"] = items_list
-
-    # Print log to terminal to confirm items are attached before encryption
-    print("DEBUG - Items fetched from DB count:", len(bill_dict["items"]))
-
-    # 4. JSON Encode and Encrypt
-    json_safe_data = jsonable_encoder(bill_dict)
-    encrypted_payload = security.encrypt_form_data(json_safe_data)
-
-    return {
-        "status": 200,
-        "message": "Bill details fetched successfully",
-        "data": encrypted_payload
-    }
+    return bill
