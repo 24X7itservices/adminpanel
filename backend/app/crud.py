@@ -22,7 +22,10 @@ from app.models import (
     BillItem,
     FullEmployeeCreate,
     QuotationRequestStatusUpdate,
-    UpdateUser
+    UpdateUser,
+    ProjectPaymentCreate,
+    ProjectPayment
+
 )
 
 from sqlmodel import Session, select, or_
@@ -393,54 +396,115 @@ def delete_quotation_request(
 # PROJECT CRUD OPERATIONS
 # ==========================================
 
-def create_project(*, session: Session, project_create: ProjectCreate) -> Project:
-    """Create a new project record."""
-    db_obj = Project.model_validate(project_create)
+def get_project_full_details(
+    db: Session, project_id: str
+) -> Optional[Project]:
+    statement = (
+        select(Project)
+        .where(Project.project_id == project_id)
+        .options(
+            selectinload(Project.expenses),
+            selectinload(Project.images),
+            selectinload(Project.documents),
+            selectinload(Project.payments),
+            selectinload(Project.followups),
+            selectinload(Project.client_employee),
+            selectinload(Project.quotation),
+            selectinload(Project.project_employees).selectinload(
+                ProjectEmployee.client_employee
+            ),
+        )
+    )
+    return db.exec(statement).first()
+
+# Lightweight project list
+def get_all_projects(
+    db: Session, skip: int = 0, limit: int = 100
+) -> List[Project]:
+    statement = select(Project).offset(skip).limit(limit)
+    return db.exec(statement).all()
+
+
+# Full project list with all 7 sub-entities eager-loaded
+def get_all_projects_full(
+    db: Session, skip: int = 0, limit: int = 100
+) -> List[Project]:
+    statement = (
+        select(Project)
+        .options(
+            selectinload(Project.expenses),
+            selectinload(Project.images),
+            selectinload(Project.documents),
+            selectinload(Project.payments),
+            selectinload(Project.followups),
+            selectinload(Project.client_employee),
+            selectinload(Project.quotation),
+            selectinload(Project.project_employees).selectinload(
+                ProjectEmployee.client_employee
+            ),
+        )
+        .offset(skip)
+        .limit(limit)
+    )
+    return db.exec(statement).all()
+
+def get_project_by_id(db: Session, project_db_id: int) -> Optional[Project]:
+    return db.get(Project, project_db_id)
+
+def get_project_by_str_id(
+    db: Session, project_id: str
+) -> Optional[Project]:
+    statement = select(Project).where(
+        Project.project_id == project_id
+    )
+    return db.exec(statement).first()
+
+def get_projects(
+    db: Session, skip: int = 0, limit: int = 100
+) -> List[Project]:
+    statement = select(Project).offset(skip).limit(limit)
+    return db.exec(statement).all()
+
+def create_project(
+    db: Session, project_create: ProjectCreate
+) -> Project:
+    db_project = Project.model_validate(project_create)
+    db.add(db_project)
+    db.commit()
+    db.refresh(db_project)
+    return db_project
+
+def update_project(
+    db: Session, project_db_id: int, project_update: ProjectUpdate
+) -> Optional[Project]:
+    db_project = get_project_by_id(db, project_db_id)
+    if not db_project:
+        return None
+
+    update_data = project_update.model_dump(exclude_unset=True)
+    db_project.sqlmodel_update(update_data)
+
+    db.add(db_project)
+    db.commit()
+    db.refresh(db_project)
+    return db_project
+
+def delete_project(db: Session, project_db_id: int) -> bool:
+    db_project = get_project_by_id(db, project_db_id)
+    if not db_project:
+        return False
+    db.delete(db_project)
+    db.commit()
+    return True
+
+def create_project_payment(
+    session: Session, payment_in: ProjectPaymentCreate
+) -> ProjectPayment:
+    db_obj = ProjectPayment.model_validate(payment_in)
     session.add(db_obj)
     session.commit()
     session.refresh(db_obj)
     return db_obj
-
-
-def get_project_by_id(*, session: Session, project_db_id: int) -> Optional[Project]:
-    """Fetch a single project by primary key ID."""
-    return session.get(Project, project_db_id)
-
-
-def get_project_by_project_id(*, session: Session, project_id: str) -> Optional[Project]:
-    """Fetch a single project by string project_id (e.g. 'PRJ-1001')."""
-    statement = select(Project).where(Project.project_id == project_id)
-    return session.exec(statement).first()
-
-
-def get_projects(
-    *, session: Session, skip: int = 0, limit: int = 100, status: Optional[str] = None
-) -> List[Project]:
-    """List projects with optional filtering by project_status and pagination."""
-    statement = select(Project)
-    if status:
-        statement = statement.where(Project.project_status == status)
-    statement = statement.offset(skip).limit(limit)
-    return list(session.exec(statement).all())
-
-
-def update_project(
-    *, session: Session, db_project: Project, project_in: ProjectUpdate
-) -> Project:
-    """Update existing project fields."""
-    project_data = project_in.model_dump(exclude_unset=True)
-    db_project.sqlmodel_update(project_data)
-    session.add(db_project)
-    session.commit()
-    session.refresh(db_project)
-    return db_project
-
-
-def delete_project(*, session: Session, db_project: Project) -> None:
-    """Delete a project (associated expenses, images, and employees cascade automatically)."""
-    session.delete(db_project)
-    session.commit()
-
 
 # ==========================================
 # PROJECT EMPLOYEES CRUD
@@ -455,7 +519,6 @@ def add_employee_to_project(
     session.commit()
     session.refresh(db_obj)
     return db_obj
-
 
 def remove_employee_from_project(
     *, session: Session, project_id: str, client_employee_id: int
@@ -472,7 +535,6 @@ def remove_employee_from_project(
         return True
     return False
 
-
 # ==========================================
 # PROJECT EXPENSES CRUD
 # ==========================================
@@ -484,7 +546,6 @@ def create_project_expense(session: Session, expense_in: ProjectExpenseCreate):
     session.refresh(db_obj)
     return db_obj
 
-
 def delete_project_expense(*, session: Session, expense_id: int) -> bool:
     """Delete a project expense record by ID."""
     db_obj = session.get(ProjectExpense, expense_id)
@@ -493,7 +554,6 @@ def delete_project_expense(*, session: Session, expense_id: int) -> bool:
         session.commit()
         return True
     return False
-
 
 # ==========================================
 # PROJECT IMAGES CRUD
@@ -509,7 +569,6 @@ def create_project_image(
     session.refresh(db_obj)
     return db_obj
 
-
 def delete_project_image(*, session: Session, image_id: int) -> bool:
     """Delete a project image record by ID."""
     db_obj = session.get(ProjectImage, image_id)
@@ -518,7 +577,6 @@ def delete_project_image(*, session: Session, image_id: int) -> bool:
         session.commit()
         return True
     return False
-
 
 def generate_next_project_id(session: Session, prefix: str = "PRJ") -> str:
 
@@ -536,7 +594,6 @@ def generate_next_project_id(session: Session, prefix: str = "PRJ") -> str:
         next_number = 1
 
     return f"{prefix}-{next_number:04d}"
-
 
 def get_project_full_details_by_id(session: Session, project_identifier: str) -> Optional[Project]:
 
@@ -578,7 +635,6 @@ def get_employee_by_client_employee_id(
         .options(selectinload(User.employee_data))
     )
     return session.exec(statement).first()
-
 
 def get_all_employees_with_details(
     session: Session, skip: int = 0, limit: int = 100

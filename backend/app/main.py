@@ -46,7 +46,28 @@ from app.models import (
     EmployeeDataCreate,
     QuotationRequestStatusUpdate,
     UserRead,
-    UpdateUser
+    UpdateUser,
+    ProjectExpensePublic,
+    ProjectExpenseBase,
+    ProjectFollowup,
+    ProjectExpense,
+    ProjectEmployeePublic,
+    ProjectEmployeeBase,
+    ProjectEmployee,
+    ProjectImagePublic,
+    ProjectImageBase,
+    ProjectImage,
+    ProjectDocumentPublic,
+    ProjectDocumentBase,
+    ProjectDocument,
+    ProjectPaymentPublic,
+    ProjectPaymentBase,
+    ProjectPayment,
+    ProjectFollowupPublic,
+    ProjectFollowupBase,
+    ProjectPaymentCreate
+
+
 )
 import uuid
 import aiofiles
@@ -1195,196 +1216,58 @@ def generate_whatsapp_quotation_pdf(ref_no: str, db: SessionDep):
 # PROJECT
 # ==========================================
 
-@app.post("/api/admin/projects",tags=["projects"],status_code=status.HTTP_201_CREATED,)
-def create_project_route(
-    payload: EncryptedFormEnvelope,
-    db: SessionDep,
+@app.post("/api/admin/projects/",response_model=ProjectPublic,status_code=status.HTTP_201_CREATED,tags=["project"])
+def create_project(
+    project: ProjectCreate, db: SessionDep
 ):
-    try:
-        decrypted_data = security.decrypt_form_data(payload.model_dump())
-        if not decrypted_data:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Security verification failed. Invalid encryption envelope.",
-            )
+    return crud.create_project(db=db, project_create=project)
 
-        # 1. Auto-generate project_id if not provided in decrypted payload
-        if not decrypted_data.get("project_id"):
-            decrypted_data["project_id"] = crud.generate_next_project_id(session=db, prefix="PRJ")
 
-        project_in = ProjectCreate(**decrypted_data)
-
-        # 2. Safety check in case of collision
-        existing_project = crud.get_project_by_project_id(
-            session=db, project_id=project_in.project_id
-        )
-        if existing_project:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Project with ID '{project_in.project_id}' already exists.",
-            )
-
-        # 3. Create record in DB
-        project = crud.create_project(session=db, project_create=project_in)
-        return {
-            "success": 201,
-            "message": "Project created successfully",
-            "data": project,
-        }
-    except HTTPException as http_exc:
-        raise http_exc
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to create project: {str(e)}",
-        )
-
-@app.get("/api/admin/projects",tags=["projects"],status_code=status.HTTP_200_OK,)
-def get_projects_route(
+@app.get("/api/admin/projects/", response_model=List[ProjectPublic],tags=["project"])
+def read_projects(
     db: SessionDep,
     skip: int = 0,
     limit: int = 100,
-    status_filter: Optional[str] = None,
 ):
-    try:
-        projects = crud.get_projects(
-            session=db, skip=skip, limit=limit, status=status_filter
-        )
-        projectencode = jsonable_encoder(projects)
-        encrypted_data = security.encrypt_form_data(projectencode)
-        if not encrypted_data:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Outbound encryption failed."
-            )
-    
-        # 5. Return response envelope
-        return {
-            "status": 200,
-            "message": "Project Data retrieved successfully",
-            "count": len(projects),
-            "data": encrypted_data
-        }
-        
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to fetch projects: {str(e)}",
-        )
+    return crud.get_projects(db=db, skip=skip, limit=limit)
 
-@app.get("/api/admin/projects/{project_db_id}",tags=["projects"],response_model=ProjectPublicWithDetails,status_code=status.HTTP_200_OK,)
-def get_project_by_id_route(
+
+@app.get("/api/admin/projects/{project_db_id}",response_model=ProjectFullDetailsPublic,tags=["project"])
+def read_project(project_db_id: int, db: SessionDep):
+    db_project = crud.get_project_by_id(db=db, project_db_id=project_db_id)
+    if not db_project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return db_project
+
+
+@app.patch("/api/admin/projects/{project_db_id}", response_model=ProjectPublic,tags=["project"])
+def update_project(
     project_db_id: int,
+    project: ProjectUpdate,
     db: SessionDep,
 ):
-    project = crud.get_project_by_id(session=db, project_db_id=project_db_id)
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Project not found",
-        )
-    return project
-
-@app.put("/api/admin/projects/{project_db_id}",tags=["projects"],status_code=status.HTTP_200_OK,)
-def update_project_route(
-    project_db_id: int,
-    payload: EncryptedFormEnvelope,
-    db: SessionDep,
-):
-    try:
-        decrypted_data = security.decrypt_form_data(payload.model_dump())
-        if not decrypted_data:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Security verification failed. Invalid encryption envelope.",
-            )
-
-        db_project = crud.get_project_by_id(session=db, project_db_id=project_db_id)
-        if not db_project:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Project not found",
-            )
-
-        project_in = ProjectUpdate(**decrypted_data)
-        updated_project = crud.update_project(
-            session=db, db_project=db_project, project_in=project_in
-        )
-        return {
-            "success": 200,
-            "message": "Project updated successfully",
-            "data": updated_project,
-        }
-    except HTTPException as http_exc:
-        raise http_exc
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to update project: {str(e)}",
-        )
-
-@app.delete("/api/admin/projects/{project_db_id}",tags=["projects"],status_code=status.HTTP_200_OK,)
-def delete_project_route(
-    project_db_id: int,
-    db: SessionDep,
-):
-    try:
-        db_project = crud.get_project_by_id(session=db, project_db_id=project_db_id)
-        if not db_project:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Project not found",
-            )
-
-        crud.delete_project(session=db, db_project=db_project)
-        return {
-            "success": 200,
-            "message": "Project deleted successfully",
-        }
-    except HTTPException as http_exc:
-        raise http_exc
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to delete project: {str(e)}",
-        )
-
-@app.post("/api/admin/projects/employees",tags=["projects"],status_code=status.HTTP_201_CREATED,)
-def add_project_employee_route(
-    payload: EncryptedFormEnvelope,
-    db: SessionDep,
-):
-    try:
-        decrypted_data = security.decrypt_form_data(payload.model_dump())
-        if not decrypted_data:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Security verification failed. Invalid encryption envelope.",
-            )
-
-        employee_in = ProjectEmployeeCreate(**decrypted_data)
-        assigned = crud.add_employee_to_project(
-            session=db, employee_in=employee_in
-        )
-        return {
-            "success": 201,
-            "message": "Employee assigned to project successfully",
-            "data": assigned,
-        }
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Failed to assign employee to project: {str(e)}",
-        )
+    updated = crud.update_project(
+        db=db, project_db_id=project_db_id, project_update=project
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return updated
 
 
-UPLOAD_DIR = "uploads/expense_proofs"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+@app.delete("/api/admin/projects/{project_db_id}", status_code=status.HTTP_204_NO_CONTENT,tags=["project"])
+def delete_project(project_db_id: int, db: SessionDep):
+    if not crud.delete_project(db=db, project_db_id=project_db_id):
+        raise HTTPException(status_code=404, detail="Project not found")
 
+# @app.post("/api/admin/projects-expenses/{project_id}",response_model=ProjectExpensePublic,tags=["project"])
+# def add_expense(
+#     project_id: str,
+#     expense: ProjectExpenseBase,
+#     db: SessionDep,
+# ):
+#     return crud.create_sub_item(
+#         db, ProjectExpense, project_id, expense.model_dump()
+#     )
 
 @app.post("/api/admin/projects-expenses",tags=["projects"],status_code=status.HTTP_201_CREATED,)
 async def add_project_expense(
@@ -1491,59 +1374,146 @@ async def upload_site_media(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/admin/next-project-id", tags=["projects"])
-def preview_next_project_id(db: SessionDep):
-    """
-    Endpoint for frontend to fetch the next auto-incremented Project ID.
-    """
-    next_id = crud.generate_next_project_id(session=db, prefix="PRJ")
     
-    encrypted_data = security.encrypt_form_data({"next_project_id": next_id})
-    if not encrypted_data:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Outbound encryption failed."
-        )
-        
-    return {
-        "status": 200,
-        "message": "Next Project ID fetched successfully",
-        "data": encrypted_data
-    }
-
-
-
-@app.get("/api/admin/fulldetails/{project_id}",response_model=ProjectFullDetailsPublic,tags=["Projects"],summary="Get complete project details with all relationships")
-def get_project_full_details_route(
-    project_id: str,
-    request: Request,
-    session: SessionDep
+@app.post("/api/admin/projects/add_employees",tags=["projects"],status_code=status.HTTP_201_CREATED,)
+def add_project_employee_route(
+    payload: EncryptedFormEnvelope,
+    db: SessionDep,
 ):
-    project = crud.get_project_full_details_by_id(session=session, project_identifier=project_id)
-    if not project:
-        raise HTTPException(status_code=404, detail="Project not found")
-    
-    # Map project_employees to include employee profile details
-    project_dict = project.model_dump()
-    project_dict["client_employee"] = project.client_employee
-    project_dict["quotation"] = project.quotation
-    project_dict["expenses"] = project.expenses
-    project_dict["images"] = project.images
-    
-    # Enrich junction table records with actual User details
-    project_dict["project_employees"] = [
-        {
-            "id": pe.id,
-            "client_employee_id": pe.client_employee_id,
-            "accepted_at": pe.accepted_at,
-            "created_at": pe.created_at,
-            "employee_details": pe.client_employee
+    try:
+        decrypted_data = security.decrypt_form_data(payload.model_dump())
+        if not decrypted_data:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Security verification failed. Invalid encryption envelope.",
+            )
+
+        employee_in = ProjectEmployeeCreate(**decrypted_data)
+        assigned = crud.add_employee_to_project(
+            session=db, employee_in=employee_in
+        )
+        return {
+            "success": 201,
+            "message": "Employee assigned to project successfully",
+            "data": assigned,
         }
-        for pe in project.project_employees
-    ]
-    
-    return project_dict
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to assign employee to project: {str(e)}",
+        )
+
+@app.post("/api/admin/projects/{project_id}/images/", response_model=ProjectImagePublic,tags=["project"])
+def add_image(
+    project_id: str,
+    image: ProjectImageBase,
+    db: SessionDep,
+):
+    return crud.create_sub_item(
+        db, ProjectImage, project_id, image.model_dump()
+    )
+
+@app.post("/api/admin/projects/{project_id}/documents/",response_model=ProjectDocumentPublic,tags=["project"])
+def add_document(
+    project_id: str,
+    doc: ProjectDocumentBase,
+    db: SessionDep,
+):
+    return crud.create_sub_item(
+        db, ProjectDocument, project_id, doc.model_dump()
+    )
+
+UPLOAD_DIR = "uploads/expense"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+@app.post("/api/admin/projects/add-payment",status_code=status.HTTP_201_CREATED,tags=["project"])
+async def add_payment(
+    project_id: str = Form(...),
+    amount: str = Form(...),
+    transaction_id: Optional[str] = Form(None),
+    transaction_type: str =Form(...),
+    transaction_proof: Optional[UploadFile] = File(None),
+    description: Optional[str] = Form(None),
+    db: SessionDep = None
+):
+    try:
+        saved_file_url = None
+
+        # 1. Process and save uploaded file asynchronously
+        if transaction_proof and transaction_proof.filename:
+            file_extension = os.path.splitext(transaction_proof.filename)[1]
+            unique_filename = f"{uuid.uuid4().hex}{file_extension}"
+            file_path = os.path.join(UPLOAD_DIR, unique_filename)
+            async with aiofiles.open(file_path, "wb") as out_file:
+                while content := await transaction_proof.read(1024 * 1024):  # Read in 1MB chunks
+                    await out_file.write(content)
+            saved_file_url = f"{settings.BASE_URL}/{UPLOAD_DIR}/{unique_filename}"
+
+        # 2. Instantiate Pydantic / SQLModel Create Schema
+        payment_in = ProjectPaymentCreate(
+            project_id=project_id,
+            amount=amount,
+            transaction_id=transaction_id,
+            transaction_type=transaction_type,
+            transaction_proof=saved_file_url,
+            description=description
+        )
+
+        db_payment = crud.create_project_payment(
+            session=db, payment_in=payment_in
+        )
+
+        return {
+            "status": 201,
+            "message": "Payment added successfully",
+            "data": db_payment,
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e)
+        )
+
+def add_payment(
+    project_id: str,
+    payment: ProjectPaymentBase,
+    db: SessionDep,
+):
+    return crud.create_sub_item(
+        db, ProjectPayment, project_id, payment.model_dump()
+    )
+
+@app.post("/api/admin/projects/{project_id}/followups/",response_model=ProjectFollowupPublic,tags=["project"])
+def add_followup(
+    project_id: str,
+    followup: ProjectFollowupBase,
+    db: SessionDep,
+):
+    return crud.create_sub_item(
+        db, ProjectFollowup, project_id, followup.model_dump()
+    )
+
+@app.get("/api/admin/fulldetails/{project_id}",response_model=ProjectFullDetailsPublic,tags=["project"])
+def read_project_full_details(project_id: str, db: SessionDep):
+    db_project = crud.get_project_full_details(db=db, project_id=project_id)
+    if not db_project:
+        raise HTTPException(
+            status_code=404, detail=f"Project '{project_id}' not found"
+        )
+    return db_project
+
+@app.get("/api/admin/projects/",response_model=List[ProjectPublic],tags=["project"])
+def read_all_projects(
+     db: SessionDep,skip: int = 0, limit: int = 100,
+):
+    return crud.get_all_projects(db=db, skip=skip, limit=limit)
+
+@app.get("/api/admin/projects/full/",response_model=List[ProjectFullDetailsPublic],tags=["project"])
+def read_all_projects_full(
+    db: SessionDep,skip: int = 0, limit: int = 100,
+):
+    return crud.get_all_projects_full(db=db, skip=skip, limit=limit)
 
 # ==========================================
 # EMPLOYEE

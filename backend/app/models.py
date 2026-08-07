@@ -51,7 +51,7 @@ class UserUpdate(UserBase):
     password: Optional[str] = Field(default=None, min_length=8, max_length=128)
 
 class UpdateUser(BaseModel):
-    full_name: Optional[str] = None
+    name: Optional[str] = None
     email: Optional[EmailStr] = None
     phone: Optional[str] = None
     district: Optional[str] = None
@@ -128,6 +128,14 @@ class UsersPublic(SQLModel):
     data: List[UserPublic]
     count: int
 
+class UserPublicMinimal(SQLModel):
+    id: Optional[int] = None
+    name: Optional[str] = None
+    email: str
+    phone: Optional[str] = None
+    role: Optional[str] = None
+    client_employee_id: Optional[str] = None
+    organisation_name: Optional[str] = None
 
 class Message(SQLModel):
     message: str
@@ -318,23 +326,20 @@ class TempCredentialsEmailRequest(SQLModel):
     temp_password: str
     login_link: str
 
-
 # ==========================================
-# 5. PROJECT EMPLOYEES (Junction Table)
+# 2. PROJECT EMPLOYEES (Junction Table)
 # ==========================================
 class ProjectEmployeeBase(SQLModel):
-    # ✅ FIX: Changed project_id type to str and foreign_key to projects.project_id
     project_id: str = Field(
-        foreign_key="projects.project_id", 
-        ondelete="CASCADE", 
+        foreign_key="projects.project_id",
+        ondelete="CASCADE",
         nullable=False,
-        max_length=100
+        max_length=100,
     )
     client_employee_id: str = Field(
-        foreign_key="users.client_employee_id", 
-        ondelete="CASCADE", 
-        # nullable=False,
-        # max_length=100
+        foreign_key="users.client_employee_id",
+        ondelete="CASCADE",
+        nullable=False,
     )
     accepted_at: Optional[datetime] = None
 
@@ -342,7 +347,9 @@ class ProjectEmployeeBase(SQLModel):
 class ProjectEmployee(ProjectEmployeeBase, table=True):
     __tablename__ = "project_employees"
     __table_args__ = (
-        UniqueConstraint("project_id", "client_employee_id", name="uq_project_employee"),
+        UniqueConstraint(
+            "project_id", "client_employee_id", name="uq_project_employee"
+        ),
     )
 
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -356,19 +363,15 @@ class ProjectEmployee(ProjectEmployeeBase, table=True):
         },
         back_populates="project_employees",
     )
-
-    # project: Optional["Project"] = Relationship(
-    #     sa_relationship_kwargs={
-    #         "primaryjoin": "ProjectEmployee.project_id == Project.project_id"
-    #     },
-    #     back_populates="project_employees",
-    # )
     project: Optional["Project"] = Relationship(
         sa_relationship_kwargs={
             "primaryjoin": "ProjectEmployee.project_id == Project.project_id"
         },
         back_populates="project_employees",
     )
+    @property
+    def employee_details(self) -> Optional["User"]:
+        return self.client_employee
 
 
 class ProjectEmployeeCreate(ProjectEmployeeBase):
@@ -382,21 +385,44 @@ class ProjectEmployeePublic(ProjectEmployeeBase):
 
 class ProjectEmployeeDetailPublic(SQLModel):
     id: int
-    project_id: str  # ✅ FIX: Changed type to str
+    project_id: str
     client_employee_id: str
     accepted_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
-    employee_details: Optional["UserPublicMinimal"] = None
+    client_employee: Optional[UserPublicMinimal] = (
+        None  # Renamed from employee_details to match DB relationship
+    )
+    employee_details: Optional[UserPublicMinimal] = Field(
+        default=None, validation_alias="client_employee"
+    )
+
+# class ProjectEmployeeDetailPublic(SQLModel):
+#     id: int
+#     project_id: str
+#     client_employee_id: str
+#     accepted_at: Optional[datetime] = None
+#     created_at: Optional[datetime] = None
+#     employee_details: Optional[UserPublicMinimal] = None
+
+#     @field_validator("employee_details", mode="before")
+#     @classmethod
+#     def populate_employee_details(cls, v, info):
+#         # Extract client_employee from the database object if employee_details is None
+#         if v is None and hasattr(info.data, "client_employee"):
+#             return info.data.client_employee
+#         return v
 
 
 # ==========================================
-# 6. PROJECT EXPENSES
+# 3. PROJECT EXPENSES
 # ==========================================
-
 class ProjectExpenseBase(SQLModel):
     expense_type: str = Field(max_length=100, nullable=False)
     expense_value: Decimal = Field(
-        default=Decimal("0.00"), max_digits=10, decimal_places=2, nullable=False
+        default=Decimal("0.00"),
+        max_digits=10,
+        decimal_places=2,
+        nullable=False,
     )
     expense_proof: Optional[str] = Field(default=None, max_length=255)
     expense_description: str = Field(max_length=255)
@@ -409,27 +435,27 @@ class ProjectExpense(ProjectExpenseBase, table=True):
     __tablename__ = "project_expenses"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    
-    # ✅ FIX: Changed to str and foreign_key="projects.project_id"
     project_id: str = Field(
-        foreign_key="projects.project_id", ondelete="CASCADE", nullable=False, max_length=100
+        foreign_key="projects.project_id",
+        ondelete="CASCADE",
+        nullable=False,
+        max_length=100,
     )
-
     project: Optional["Project"] = Relationship(back_populates="expenses")
 
 
 class ProjectExpenseCreate(ProjectExpenseBase):
-    project_id: str  # ✅ Changed to str
+    project_id: str
 
 
 class ProjectExpensePublic(ProjectExpenseBase):
     id: int
-    project_id: str  # ✅ Changed to str
+    project_id: str
+
 
 # ==========================================
-# 7. PROJECT IMAGES
+# 4. PROJECT IMAGES
 # ==========================================
-
 class ProjectImageBase(SQLModel):
     image_path: str = Field(max_length=255, nullable=False)
     is_thumbnail: bool = Field(default=False, nullable=False)
@@ -439,51 +465,118 @@ class ProjectImage(ProjectImageBase, table=True):
     __tablename__ = "project_images"
 
     id: Optional[int] = Field(default=None, primary_key=True)
-    
-    # ✅ FIX: Changed to str and foreign_key="projects.project_id"
     project_id: str = Field(
-        foreign_key="projects.project_id", ondelete="CASCADE", nullable=False, max_length=100
+        foreign_key="projects.project_id",
+        ondelete="CASCADE",
+        nullable=False,
+        max_length=100,
     )
     uploaded_at: Optional[datetime] = Field(
         default_factory=get_datetime_utc, nullable=False
     )
-
     project: Optional["Project"] = Relationship(back_populates="images")
 
 
 class ProjectImageCreate(ProjectImageBase):
-    project_id: str  # ✅ Changed to str
-
-
-class ProjectImageCreate(SQLModel):
     project_id: str
-    image_path: str
-    is_thumbnail: Optional[bool] = False
 
 
 class ProjectImagePublic(ProjectImageBase):
     id: int
-    project_id: str  # ✅ Changed to str
+    project_id: str
     uploaded_at: datetime
 
-# ==========================================
-# 8. MAIN PROJECTS TABLE
-# ==========================================
 
-class ProjectBase(SQLModel):
-    # project_id: str = Field(max_length=100, unique=True, index=True, nullable=False)
+# ==========================================
+# 5. PROJECT DOCUMENTS, PAYMENTS & FOLLOWUPS
+# ==========================================
+class ProjectDocumentBase(SQLModel):
+    document_text: str = Field(max_length=255)
+    document_url: str = Field(max_length=255)
 
-    project_id: Optional[str] = Field(default=None, max_length=255, unique=True)
-    client_employee_id: Optional[str] = Field(
-        default=None, foreign_key="users.client_employee_id", max_length=255
+
+class ProjectDocument(ProjectDocumentBase, table=True):
+    __tablename__ = "project_documents"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: str = Field(
+        foreign_key="projects.project_id", ondelete="CASCADE", nullable=False
     )
-    
-    # ✅ Fixed: Refers to users.client_employee_id
+    project: Optional["Project"] = Relationship(back_populates="documents")
+
+
+class ProjectDocumentPublic(ProjectDocumentBase):
+    id: int
+    project_id: str
+
+
+class ProjectPaymentBase(SQLModel):
+    project_id: str = Field(
+        foreign_key="projects.project_id",
+        ondelete="CASCADE",
+        nullable=False,
+        max_length=100,
+    )
+    amount: Decimal = Field(
+        default=Decimal("0.00"), max_digits=10, decimal_places=2
+    )
+    # Made optional
+    transaction_id: Optional[str] = Field(
+        default=None, max_length=100, nullable=True
+    )
+    transaction_type: str = Field(max_length=50)
+    transaction_proof: Optional[str] = Field(default=None, max_length=255)
+    description: Optional[str] = Field(default=None, max_length=255)
+    transaction_date: Optional[datetime] = Field(default=None, nullable=True)
+
+
+class ProjectPayment(ProjectPaymentBase, table=True):
+    __tablename__ = "project_payments"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: str = Field(
+        foreign_key="projects.project_id", ondelete="CASCADE", nullable=False
+    )
+    project: Optional["Project"] = Relationship(back_populates="payments")
+
+
+class ProjectPaymentPublic(ProjectPaymentBase):
+    id: int
+    project_id: str
+
+class ProjectPaymentCreate(ProjectPaymentBase):
+    pass
+
+class ProjectFollowupBase(SQLModel):
+    notes: str = Field(max_length=500)
+
+
+class ProjectFollowup(ProjectFollowupBase, table=True):
+    __tablename__ = "project_followups"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: str = Field(
+        foreign_key="projects.project_id", ondelete="CASCADE", nullable=False
+    )
+    created_at: Optional[datetime] = Field(default_factory=get_datetime_utc)
+    project: Optional["Project"] = Relationship(back_populates="followups")
+
+
+class ProjectFollowupPublic(ProjectFollowupBase):
+    id: int
+    project_id: str
+    created_at: Optional[datetime] = None
+
+
+# ==========================================
+# 6. MAIN PROJECTS TABLE & SCHEMAS
+# ==========================================
+class ProjectBase(SQLModel):
+    project_id: Optional[str] = Field(
+        default=None, max_length=255, unique=True, index=True
+    )
     client_employee_id: Optional[str] = Field(
-        default=None, 
-        foreign_key="users.client_employee_id", 
-        ondelete="SET NULL", 
-        nullable=True
+        default=None,
+        foreign_key="users.client_employee_id",
+        ondelete="SET NULL",
+        nullable=True,
     )
     quotation_reference_number: Optional[str] = Field(
         default=None,
@@ -495,12 +588,12 @@ class ProjectBase(SQLModel):
     project_start_date: Optional[date] = None
     project_end_date: Optional[date] = None
     project_status: str = Field(default="Pending", max_length=50)
+
     @field_validator("project_start_date", "project_end_date", mode="before")
     @classmethod
     def parse_flexible_date(cls, value):
         if isinstance(value, str) and value.strip():
             value_str = value.strip()
-            # Try parsing common date formats
             for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
                 try:
                     return datetime.strptime(value_str, fmt).date()
@@ -516,13 +609,10 @@ class Project(ProjectBase, table=True):
     __tablename__ = "projects"
 
     id: Optional[int] = Field(default=None, primary_key=True)
+    roundup: Optional[str] = None
     created_at: Optional[datetime] = Field(
         default_factory=get_datetime_utc, nullable=True
     )
-
-    # Relationships
-    # client_employee: Optional[User] = Relationship(back_populates="managed_projects")
-    quotation: Optional[Quotation] = Relationship(back_populates="projects")
 
     client_employee: Optional["User"] = Relationship(
         sa_relationship_kwargs={
@@ -530,22 +620,36 @@ class Project(ProjectBase, table=True):
         },
         back_populates="managed_projects",
     )
+    quotation: Optional["Quotation"] = Relationship(back_populates="projects")
 
-    project_employees: List[ProjectEmployee] = Relationship(back_populates="project")
-    
-    # ✅ Clean SQLModel cascade syntax
+    project_employees: List[ProjectEmployee] = Relationship(
+        back_populates="project",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
     expenses: List[ProjectExpense] = Relationship(
         back_populates="project",
-        cascade_delete=True
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
     images: List[ProjectImage] = Relationship(
         back_populates="project",
-        cascade_delete=True
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
+    documents: List[ProjectDocument] = Relationship(
+        back_populates="project",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
+    payments: List[ProjectPayment] = Relationship(
+        back_populates="project",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
+    followups: List[ProjectFollowup] = Relationship(
+        back_populates="project",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
 
 
 class ProjectCreate(ProjectBase):
-    pass
+    roundup: Optional[str] = None
 
 
 class ProjectUpdate(SQLModel):
@@ -555,6 +659,7 @@ class ProjectUpdate(SQLModel):
     project_start_date: Optional[date] = None
     project_end_date: Optional[date] = None
     project_status: Optional[str] = None
+    roundup: Optional[str] = None
 
 
 class ProjectPublic(ProjectBase):
@@ -565,35 +670,22 @@ class ProjectPublic(ProjectBase):
 class ProjectPublicWithDetails(ProjectPublic):
     expenses: List[ProjectExpensePublic] = Field(default_factory=list)
     images: List[ProjectImagePublic] = Field(default_factory=list)
-    project_employees: List[ProjectEmployeePublic] = Field(default_factory=list)
-
-class UserPublicMinimal(SQLModel):
-    id: Optional[int] = None
-    name: Optional[str] = None
-    email: str
-    phone: Optional[str] = None
-    role: Optional[str] = None
-    client_employee_id: Optional[str] = None
-    organisation_name: Optional[str] = None
-
-
-class ProjectEmployeeDetailPublic(SQLModel):
-    id: int
-    client_employee_id: str
-    accepted_at: Optional[datetime] = None
-    created_at: Optional[datetime] = None
-    employee_details: Optional[UserPublicMinimal] = None  # Nested user info
+    project_employees: List[ProjectEmployeePublic] = Field(
+        default_factory=list
+    )
 
 
 class ProjectFullDetailsPublic(ProjectPublic):
-    # Embedded Relations
     client_employee: Optional[UserPublicMinimal] = None
     quotation: Optional[QuotationReadWithProducts] = None
     expenses: List[ProjectExpensePublic] = Field(default_factory=list)
     images: List[ProjectImagePublic] = Field(default_factory=list)
-    project_employees: List[ProjectEmployeeDetailPublic] = Field(default_factory=list)
-
-
+    documents: List[ProjectDocumentPublic] = Field(default_factory=list)
+    payments: List[ProjectPaymentPublic] = Field(default_factory=list)
+    followups: List[ProjectFollowupPublic] = Field(default_factory=list)
+    project_employees: List[ProjectEmployeeDetailPublic] = Field(
+        default_factory=list
+    )
 # ==========================================
 # EMPLOYEE DATA MODELS
 # ==========================================
