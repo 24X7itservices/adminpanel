@@ -36,6 +36,7 @@ class UserBase(SQLModel):
     pincode: Optional[str] = Field(default=None, max_length=10)
     district: Optional[str] = Field(default=None, max_length=255)
     state: Optional[str] = Field(default=None, max_length=255)
+    gstin: Optional[str] = Field(default=None, max_length=255)
 
 
 class UserCreate(UserBase):
@@ -79,6 +80,8 @@ class User(UserBase, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     password: str
+    email: str = Field(index=True)
+    role: str = Field(max_length=50)
     created_at: Optional[datetime] = Field(
         default_factory=get_datetime_utc,
         sa_type=DateTime(timezone=True),
@@ -136,6 +139,7 @@ class UserPublicMinimal(SQLModel):
     role: Optional[str] = None
     client_employee_id: Optional[str] = None
     organisation_name: Optional[str] = None
+    gstin: Optional[str] = None
 
 class Message(SQLModel):
     message: str
@@ -902,6 +906,7 @@ class ClientDetailsPublic(BaseModel):
     pincode: Optional[str] = None
     created_at: Optional[datetime] = None
     organisation_name: Optional[str] = None
+    gstin: Optional[str] = None
 
 
 class BillFullResponse(BaseModel):
@@ -914,6 +919,7 @@ class BillFullResponse(BaseModel):
     created_at: Optional[datetime] = None
     url_call: Optional[str] = None
     place_of_supply: Optional[str] = None
+    discount: float
 
     items: List[BillItemPublic] = []
     # Maps 'client' relationship from DB model to 'clientDetails' in JSON response
@@ -945,6 +951,7 @@ class BillBase(SQLModel):
     status: Optional[str] = Field(default="unpaid", max_length=50)
     url_call: str = Field(max_length=255)
     place_of_supply: str= Field(max_length=255)
+    discount: float = Field(default=0.0)
 
 
 class Bill(SQLModel, table=True):
@@ -953,12 +960,15 @@ class Bill(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     bill_refrence_number: str = Field(max_length=255, unique=True, index=True)
     quotation_reference_number: Optional[str] = Field(default=None, max_length=100)
-    client_employee_id: Optional[str] = Field(default=None, max_length=255)
+    client_employee_id: Optional[str] = Field(
+        default=None, foreign_key="users.client_employee_id", max_length=255
+    )
     total_amount: float = Field(default=0.0)
     status: Optional[str] = Field(default="unpaid", max_length=50)
     created_at: Optional[datetime] = Field(default_factory=datetime.utcnow)
     url_call: str = Field(max_length=100, unique=True, index=True)
     place_of_supply: str = Field(max_length=100, unique=True, index=True)
+    discount: float = Field(default=0.0)
 
     # Note lazy="selectin" forces eager loading of items on every query
     items: List["BillItem"] = Relationship(

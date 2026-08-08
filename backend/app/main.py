@@ -226,6 +226,7 @@ async def create_user_route(
     aadhar_card: Optional[UploadFile] = File(None),
     pan_card: Optional[UploadFile] = File(None),
     dl: Optional[UploadFile] = File(None),
+    profilePic: Optional[UploadFile] = File(None),
 ):
 # async def create_user_route(
 #     db: SessionDep,
@@ -284,10 +285,12 @@ async def create_user_route(
         aadhar_path = save_uploaded_file(aadhar_card, "aadhar")
         pan_path = save_uploaded_file(pan_card, "pan")
         dl_path = save_uploaded_file(dl, "dl")
+        profilePic = save_uploaded_file(profilePic, "profilePic")
         
         aadhar_file_url = f"{settings.BASE_URL}/{aadhar_path}"
         pan_file_url = f"{settings.BASE_URL}/{pan_path}"
         dl_file_url = f"{settings.BASE_URL}/{dl_path}"
+        profilePic_file_url = f"{settings.BASE_URL}/{profilePic}"
 
         # Create Primary User
         user_in = UserCreate(
@@ -303,6 +306,7 @@ async def create_user_route(
             password=password,
             organisation_name="NA",
             terms_and_condition=True,
+            profile_avatar=profilePic_file_url,
         )
         new_user = crud.create_user(session=db, user_create=user_in)
 
@@ -1753,6 +1757,46 @@ def create_bill_route(
             detail=f"Failed to create bill: {str(e)}",
         )
 
+@app.put("/api/admin/bills/{bill_id}",response_model=dict,tags=["Bills"],summary="Update an existing bill with items",)
+def update_bill_route(
+    bill_id: str,
+    bill_data: EncryptedFormEnvelope,
+    session: SessionDep,
+    current_user: CurrentUser,
+):
+    decrypted_data = security.decrypt_form_data(bill_data.model_dump())
+    if not decrypted_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Security verification failed. Invalid encryption envelope."
+        )
+    try:
+        updated_bill = crud.update_bill_with_items(
+            session=session, 
+            bill_id=bill_id, 
+            bill_data=decrypted_data
+        )
+        
+        json_safe_data = jsonable_encoder(updated_bill)
+        encrypted_data = security.encrypt_form_data(json_safe_data)
+
+        return {
+            "status": 200,
+            "message": "Bill updated successfully",
+            "data": encrypted_data,
+        }
+    except ValueError as ve:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(ve),
+        )
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update bill: {str(e)}",
+        )
 
 @app.get("/api/admin/bills",response_model=dict,tags=["Bills"],summary="Get all bills with line items",)
 def get_all_bills_route(

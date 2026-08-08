@@ -41,6 +41,17 @@ from fastapi import HTTPException, status
 from app.models import User, QuotationRequest
 
 def create_user(*, session: Session, user_create: UserCreate) -> User:
+    existing_user = get_user_by_email_and_role(
+        session=session, 
+        email=user_create.email, 
+        role=user_create.role
+    )
+    
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"A user with email '{user_create.email}' and role '{user_create.role}' already exists."
+        )
     db_obj = User.model_validate(
         user_create, update={"password": SecurityService.get_password_hash(user_create.password)}
     )
@@ -774,6 +785,47 @@ def create_bill_with_items(session: Session, bill_data: dict) -> Bill:
     session.refresh(new_bill)
     return new_bill
 
+def update_bill_with_items(session: Session, bill_id: str, bill_data: dict) -> Bill:
+    # 1. Fetch existing bill
+    bill = get_bill_by_url_call(session, bill_id)
+    if not bill:
+        raise ValueError(f"Bill with ID {bill_id} not found")
+
+    # 2. Update scalar fields
+    bill_ref_no = bill_data.get("bill_refrence_number", bill.bill_refrence_number)
+    bill.bill_refrence_number = bill_ref_no
+    bill.url_call = bill_ref_no.replace('/', '_')
+    bill.quotation_reference_number = bill_data.get("quotation_reference_number", bill.quotation_reference_number)
+    bill.client_employee_id = bill_data.get("client_employee_id", bill.client_employee_id)
+    bill.total_amount = bill_data.get("total_amount", bill.total_amount)
+    bill.status = bill_data.get("status", bill.status)
+    bill.place_of_supply = bill_data.get("place_of_supply", bill.place_of_supply)
+    bill.discount = bill_data.get("discount", bill.discount)
+
+    # 3. Replace/Update line items if provided
+    if "items" in bill_data:
+        # Clearing relationship list triggers orphan deletion via delete-orphan cascade
+        bill.items.clear()
+        
+        items_payload = bill_data.get("items", [])
+        for item in items_payload:
+            # Supports both price_per_unit and frontend camelCase pricePerUnit
+            price = item.get("price_per_unit") if "price_per_unit" in item else item.get("pricePerUnit", 0.0)
+            
+            bill_item = BillItem(
+                bill_refrence_number=bill_ref_no,
+                name=item.get("name"),
+                hsn=item.get("hsn"),
+                quantity=item.get("quantity", 0),
+                unit=item.get("unit"),
+                price_per_unit=price,
+            )
+            bill.items.append(bill_item)
+
+    session.add(bill)
+    session.commit()
+    session.refresh(bill)
+    return bill
 
 def get_all_bills(
     session: Session, skip: int = 0, limit: int = 100
