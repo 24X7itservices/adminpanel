@@ -5,9 +5,22 @@ import uuid
 from pydantic import BaseModel, ConfigDict
 from pydantic import EmailStr
 from sqlmodel import Field, Relationship, SQLModel
-from sqlalchemy import DateTime, UniqueConstraint
+from sqlalchemy import (
+    DateTime,
+    UniqueConstraint,
+    Column,
+    Integer,
+    String,
+    Numeric,
+    Enum as SQLEnum,
+    ForeignKey,
+    func,
+)
+from sqlalchemy.orm import declarative_base
 from pydantic import field_validator
 from enum import Enum
+
+Base = declarative_base()
 
 
 def get_datetime_utc() -> datetime:
@@ -51,6 +64,7 @@ class UserUpdate(UserBase):
     email: Optional[EmailStr] = Field(default=None, max_length=255)  # type: ignore
     password: Optional[str] = Field(default=None, min_length=8, max_length=128)
 
+
 class UpdateUser(BaseModel):
     name: Optional[str] = None
     email: Optional[EmailStr] = None
@@ -61,15 +75,46 @@ class UpdateUser(BaseModel):
     address: Optional[str] = None
     organisation_name: Optional[str] = None
     is_active: Optional[bool] = None
+    gstin: Optional[str] = None
+
 
 class UserUpdateMe(SQLModel):
     name: Optional[str] = Field(default=None, max_length=255)
     email: Optional[EmailStr] = Field(default=None, max_length=255)
 
 
+class UserUpdate(SQLModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+    pincode: Optional[str] = None
+    district: Optional[str] = None
+    state: Optional[str] = None
+    organisation_name: Optional[str] = None
+    gstin: Optional[str] = None
+    profile_avatar: Optional[str] = None
+
+
+class UserStatusUpdate(BaseModel):
+    is_active: bool
+
+
+# Schema for updating Employee-specific fields
+class EmployeeDataUpdate(SQLModel):
+    bank_name: Optional[str] = None
+    account_name: Optional[str] = None
+    ifsc_code: Optional[str] = None
+    account_number: Optional[str] = None
+    aadhar_file_url: Optional[str] = None
+    pancard_file_url: Optional[str] = None
+    dl_file_url: Optional[str] = None
+
+
 class UpdatePassword(SQLModel):
     current_password: str = Field(min_length=8, max_length=128)
     new_password: str = Field(min_length=8, max_length=128)
+
 
 class UserRead(UserBase):
     id: int
@@ -82,6 +127,8 @@ class User(UserBase, table=True):
     password: str
     email: str = Field(index=True)
     role: str = Field(max_length=50)
+    gstin: Optional[str] = Field(default=None, max_length=255)
+    profile_avatar: Optional[str] = Field(default=None, max_length=255)
     created_at: Optional[datetime] = Field(
         default_factory=get_datetime_utc,
         sa_type=DateTime(timezone=True),
@@ -117,10 +164,12 @@ class User(UserBase, table=True):
         back_populates="user",
     )
 
+
 class UserWithEmployeeDataPublic(UserBase):
     id: int
     created_at: Optional[datetime] = None
     employee_data: Optional["EmployeeDataPublic"] = None
+
 
 class UserPublic(UserBase):
     id: int
@@ -131,6 +180,7 @@ class UsersPublic(SQLModel):
     data: List[UserPublic]
     count: int
 
+
 class UserPublicMinimal(SQLModel):
     id: Optional[int] = None
     name: Optional[str] = None
@@ -140,6 +190,7 @@ class UserPublicMinimal(SQLModel):
     client_employee_id: Optional[str] = None
     organisation_name: Optional[str] = None
     gstin: Optional[str] = None
+
 
 class Message(SQLModel):
     message: str
@@ -162,6 +213,8 @@ class NewPassword(SQLModel):
 # ==========================================
 # 2. PRODUCT MODELS
 # ==========================================
+
+
 class Product(SQLModel, table=True):
     __tablename__: str = "products"
 
@@ -173,6 +226,8 @@ class Product(SQLModel, table=True):
 # ==========================================
 # 3. QUOTATION MODELS
 # ==========================================
+
+
 class Quotation(SQLModel, table=True):
     __tablename__ = "quotations"
 
@@ -258,6 +313,7 @@ class QuotationCreateRequest(SQLModel):
     quotation_for: Optional[str] = None
     quotation_status: str
 
+
 class QuotationStatusUpdate(BaseModel):
     quotation_status: str
 
@@ -286,10 +342,12 @@ class ContactFormPublic(SQLModel):
     id: int
     created_at: Optional[datetime] = None
 
+
 class QuotationStatus(str, Enum):
     PENDING = "pending"
     VIEWED = "viewed"
-    CANCELLED= "cancelled"
+    CANCELLED = "cancelled"
+
 
 class QuotationRequest(SQLModel, table=True):
     __tablename__ = "quotation_requests"
@@ -305,6 +363,7 @@ class QuotationRequest(SQLModel, table=True):
     created_at: Optional[datetime] = Field(
         default_factory=get_datetime_utc, nullable=True
     )
+
 
 class QuotationRequestStatusUpdate(BaseModel):
     status: Optional[str] = "viewed"
@@ -329,6 +388,7 @@ class TempCredentialsEmailRequest(SQLModel):
     name: str
     temp_password: str
     login_link: str
+
 
 # ==========================================
 # 2. PROJECT EMPLOYEES (Junction Table)
@@ -373,6 +433,7 @@ class ProjectEmployee(ProjectEmployeeBase, table=True):
         },
         back_populates="project_employees",
     )
+
     @property
     def employee_details(self) -> Optional["User"]:
         return self.client_employee
@@ -399,6 +460,7 @@ class ProjectEmployeeDetailPublic(SQLModel):
     employee_details: Optional[UserPublicMinimal] = Field(
         default=None, validation_alias="client_employee"
     )
+
 
 # class ProjectEmployeeDetailPublic(SQLModel):
 #     id: int
@@ -503,6 +565,7 @@ class ProjectDocumentBase(SQLModel):
     )
     document_text: Optional[str] = Field(default=None)
     document_url: str = Field(nullable=False, max_length=2083)
+    created_at: Optional[datetime] = None
 
 
 class ProjectDocument(ProjectDocumentBase, table=True):
@@ -521,8 +584,10 @@ class ProjectDocumentPublic(ProjectDocumentBase):
     id: int
     project_id: str
 
+
 class ProjectDocumentCreate(ProjectDocumentBase):
     pass
+
 
 class ProjectPaymentBase(SQLModel):
     project_id: str = Field(
@@ -531,13 +596,9 @@ class ProjectPaymentBase(SQLModel):
         nullable=False,
         max_length=100,
     )
-    amount: Decimal = Field(
-        default=Decimal("0.00"), max_digits=10, decimal_places=2
-    )
+    amount: Decimal = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
     # Made optional
-    transaction_id: Optional[str] = Field(
-        default=None, max_length=100, nullable=True
-    )
+    transaction_id: Optional[str] = Field(default=None, max_length=100, nullable=True)
     transaction_type: str = Field(max_length=50)
     transaction_proof: Optional[str] = Field(default=None, max_length=255)
     description: Optional[str] = Field(default=None, max_length=255)
@@ -550,7 +611,9 @@ class ProjectPayment(ProjectPaymentBase, table=True):
         foreign_key="projects.project_id", ondelete="CASCADE", nullable=False
     )
     project: Optional["Project"] = Relationship(back_populates="payments")
-    transaction_date: Optional[datetime] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    transaction_date: Optional[datetime] = datetime.utcnow().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
 
     amount: Decimal
     transaction_id: Optional[str] = Field(default=None, unique=True)
@@ -572,8 +635,10 @@ class ProjectPaymentPublic(ProjectPaymentBase):
     payment_status: str
     description: Optional[str] = None
 
+
 class ProjectPaymentCreate(ProjectPaymentBase):
     pass
+
 
 class ProjectFollowupBase(SQLModel):
     followup_date: date
@@ -596,8 +661,10 @@ class ProjectFollowupPublic(ProjectFollowupBase):
     project_id: str
     created_at: Optional[datetime] = None
 
+
 class ProjectFollowupCreate(ProjectFollowupBase):
     project_id: str
+
 
 # ==========================================
 # 6. MAIN PROJECTS TABLE & SCHEMAS
@@ -623,7 +690,6 @@ class ProjectBase(SQLModel):
     project_end_date: Optional[date] = None
     project_status: str = Field(default="Pending", max_length=50)
     roundup: Optional[float] = None
-    
 
     @field_validator("project_start_date", "project_end_date", mode="before")
     @classmethod
@@ -646,8 +712,12 @@ class Project(ProjectBase, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     project_id: Optional[str] = Field(default=None, unique=True, index=True)
-    client_employee_id: Optional[str] = Field(default=None, foreign_key="users.client_employee_id")
-    quotation_reference_number: Optional[str] = Field(default=None, foreign_key="quotations.quotation_reference_number")
+    client_employee_id: Optional[str] = Field(
+        default=None, foreign_key="users.client_employee_id"
+    )
+    quotation_reference_number: Optional[str] = Field(
+        default=None, foreign_key="quotations.quotation_reference_number"
+    )
     project_start_date: Optional[date] = None
     project_end_date: Optional[date] = None
     project_status: str = Field(default="Pending")
@@ -699,7 +769,7 @@ class Project(ProjectBase, table=True):
     # Relationships
     payments: List["ProjectPayment"] = Relationship(
         back_populates="project",
-        sa_relationship_kwargs={"cascade": "all, delete-orphan"}
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
 
     # Wrap foreign() around Bill.quotation_reference_number
@@ -711,10 +781,12 @@ class Project(ProjectBase, table=True):
         }
     )
 
+
 class ProjectResponseWrapper(BaseModel):
     success: int
     message: str
     data: ProjectPublic
+
 
 class ProjectCreate(ProjectBase):
     roundup: Optional[float] = None
@@ -740,7 +812,7 @@ class ProjectPublic(ProjectBase):
     project_status: str
     roundup: Optional[float] = None
     created_at: Optional[datetime] = None
-    
+
     # Add payments list here
     payments: List[ProjectPaymentPublic] = []
 
@@ -750,9 +822,8 @@ class ProjectPublic(ProjectBase):
 class ProjectPublicWithDetails(ProjectPublic):
     expenses: List[ProjectExpensePublic] = Field(default_factory=list)
     images: List[ProjectImagePublic] = Field(default_factory=list)
-    project_employees: List[ProjectEmployeePublic] = Field(
-        default_factory=list
-    )
+    project_employees: List[ProjectEmployeePublic] = Field(default_factory=list)
+
 
 class ProjectFullDetailsPublic(ProjectPublic):
     client_employee: Optional[UserPublicMinimal] = None
@@ -762,15 +833,15 @@ class ProjectFullDetailsPublic(ProjectPublic):
     documents: List[ProjectDocumentPublic] = Field(default_factory=list)
     payments: List[ProjectPaymentPublic] = Field(default_factory=list)
     followups: List[ProjectFollowupPublic] = Field(default_factory=list)
-    project_employees: List[ProjectEmployeeDetailPublic] = Field(
-        default_factory=list
-    )
+    project_employees: List[ProjectEmployeeDetailPublic] = Field(default_factory=list)
+
 
 class ProjectRoundupUpdate(SQLModel):
     roundup: float = Field(
         ...,
         description="Updated numeric roundup value for the project",
     )
+
 
 class ProjectStatusUpdate(SQLModel):
     project_status: str = Field(
@@ -797,9 +868,12 @@ class ProjectStatusUpdate(SQLModel):
                 f"Invalid date format '{value}'. Expected YYYY-MM-DD, DD/MM/YYYY, or DD-MM-YYYY."
             )
         return value
+
+
 # ==========================================
 # EMPLOYEE DATA MODELS
 # ==========================================
+
 
 class EmployeeDataBase(SQLModel):
     client_employee_id: str = Field(
@@ -816,6 +890,7 @@ class EmployeeDataBase(SQLModel):
     ifsc_code: Optional[str] = Field(default=None, max_length=20)
     account_number: Optional[str] = Field(default=None, max_length=50)
 
+
 class EmployeeData(EmployeeDataBase, table=True):
     __tablename__: str = "employee_data"
 
@@ -831,21 +906,103 @@ class EmployeeData(EmployeeDataBase, table=True):
         back_populates="employee_data",
     )
 
+
 class EmployeeDataPublic(EmployeeDataBase):
     id: int
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
+
 class EmployeeDataCreate(EmployeeDataBase):
     pass
+
 
 class FullEmployeeCreate(SQLModel):
     user_info: UserCreate
     employee_details: EmployeeDataCreate
 
+
+# ==========================================
+# EMPLOYEE PAYMENT FULL DATA MODELS
+# ==========================================
+
+
+class EmployeePaymentRead(BaseModel):
+    id: int
+    project_id: str
+    amount: Decimal
+    payment_status: str
+    payment_date: Optional[datetime] = None
+    payment_source: Optional[str] = None
+    transaction_id: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+# --- Project Payment Schema ---
+class ProjectPaymentRead(BaseModel):
+    id: int
+    amount: float
+    payment_status: str
+    payment_date: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+# --- Project Detail Schema ---
+class ProjectRead(BaseModel):
+    project_id: Optional[str] = None
+    project_start_date: Optional[date] = None
+    project_end_date: Optional[date] = None
+    project_status: str
+    payments: List[ProjectPaymentRead] = []
+
+    class Config:
+        from_attributes = True
+
+
+# --- Employee Data Schema ---
+class EmployeeDataRead(BaseModel):
+    bank_name: Optional[str] = None
+    account_name: Optional[str] = None
+    ifsc_code: Optional[str] = None
+    account_number: Optional[str] = None
+    aadhar_file_url: Optional[str] = None
+    pancard_file_url: Optional[str] = None
+    dl_file_url: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+# --- Aggregated Full Detail DTO ---
+class EmployeeFullDetailResponse(BaseModel):
+    client_employee_id: str
+    name: Optional[str] = None
+    email: EmailStr
+    phone: Optional[str] = None
+    role: Optional[str] = None
+    organisation_name: Optional[str] = None
+    address: Optional[str] = None
+    district: Optional[str] = None
+    state: Optional[str] = None
+    pincode: Optional[str] = None
+
+    employee_data: Optional[EmployeeDataRead] = None
+    managed_projects: List[ProjectRead] = []
+    received_payments: List[EmployeePaymentRead] = []
+    profile_avatar: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
 # ==========================================
 # BILL ITEM MODEL
 # ==========================================
+
 
 class BillItemBase(SQLModel):
     # Configure Pydantic to allow both field name and camelCase alias
@@ -892,6 +1049,7 @@ class BillItemPublic(BaseModel):
     price_per_unit: float
     created_at: Optional[datetime] = None
 
+
 class ClientDetailsPublic(BaseModel):
     id: int
     client_employee_id: str
@@ -924,25 +1082,25 @@ class BillFullResponse(BaseModel):
     items: List[BillItemPublic] = []
     # Maps 'client' relationship from DB model to 'clientDetails' in JSON response
     client_details: Optional[ClientDetailsPublic] = Field(
-        default=None, 
-        alias="client", 
-        serialization_alias="clientDetails"
+        default=None, alias="client", serialization_alias="clientDetails"
     )
     projects: List[ProjectPublic] = []
 
     # Use model_config ONLY (remove 'class Config:')
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
-   
 
 # ==========================================
 # 2. BILL MODEL
 # ==========================================
 
+
 class BillBase(SQLModel):
     bill_refrence_number: str = Field(max_length=255, unique=True, index=True)
     quotation_reference_number: Optional[str] = Field(
-        default=None, foreign_key="quotations.quotation_reference_number", max_length=100
+        default=None,
+        foreign_key="quotations.quotation_reference_number",
+        max_length=100,
     )
     client_employee_id: Optional[str] = Field(
         default=None, foreign_key="users.client_employee_id", max_length=255
@@ -950,7 +1108,7 @@ class BillBase(SQLModel):
     total_amount: float = Field(default=0.0)
     status: Optional[str] = Field(default="unpaid", max_length=50)
     url_call: str = Field(max_length=255)
-    place_of_supply: str= Field(max_length=255)
+    place_of_supply: str = Field(max_length=255)
     discount: float = Field(default=0.0)
 
 
@@ -972,8 +1130,7 @@ class Bill(SQLModel, table=True):
 
     # Note lazy="selectin" forces eager loading of items on every query
     items: List["BillItem"] = Relationship(
-        back_populates="bill",
-        sa_relationship_kwargs={"cascade": "all, delete-orphan"}
+        back_populates="bill", sa_relationship_kwargs={"cascade": "all, delete-orphan"}
     )
 
     # Wrap foreign() around Project.quotation_reference_number
@@ -1001,3 +1158,137 @@ class BillWithItemsPublic(BillBase):
     id: int
     created_at: Optional[datetime] = None
     items: List[BillItemPublic] = []
+
+class BillStatusUpdate(SQLModel):
+    status: str = Field(..., max_length=50, description="Updated status, e.g., 'paid', 'partially_paid', 'unpaid', 'cancelled'")
+
+
+class BillRead(BillBase):
+    id: int
+    created_at: Optional[datetime] = None
+    
+# ==========================================
+# 2. PROJECT EMPLOYEE PAYMENT
+# ==========================================
+
+
+class PaymentStatus(str, Enum):
+    PENDING = "Pending"
+    COMPLETED = "Completed"
+    FAILED = "Failed"
+    REFUNDED = "Refunded"
+
+
+class ProjectPaymentEmployee(Base):
+    __tablename__ = "project_payments_employee"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    project_id = Column(
+        String(255),
+        ForeignKey(
+            "projects.project_id",
+            ondelete="CASCADE",
+            onupdate="CASCADE",
+            use_alter=True,
+            name="fk_emp_pay_project",
+        ),
+        nullable=False,
+        index=True,
+    )
+    client_employee_id = Column(
+        String(255),
+        ForeignKey(
+            "users.client_employee_id",
+            ondelete="SET NULL",
+            onupdate="CASCADE",
+            use_alter=True,
+            name="fk_emp_pay_user",
+        ),
+        nullable=True,
+        index=True,
+    )
+    amount = Column(Numeric(10, 2), nullable=False)
+    payment_status = Column(
+        SQLEnum(PaymentStatus, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        default=PaymentStatus.PENDING,
+    )
+    payment_date = Column(DateTime, server_default=func.now())
+    payment_source = Column(String(100), nullable=True)
+    transaction_id = Column(String(255), unique=True, nullable=True)
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class PaymentCreate(BaseModel):
+    project_id: str
+    client_employee_id: Optional[str] = None
+    amount: Decimal
+    payment_status: PaymentStatus = PaymentStatus.PENDING
+    payment_source: Optional[str] = None
+    transaction_id: Optional[str] = None
+
+
+class PaymentResponse(PaymentCreate):
+    id: int
+    payment_date: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+# ==========================================
+# 2. JOB POSTING
+# ==========================================
+
+
+class JobDataBase(SQLModel):
+    job_id: str = Field(unique=True, index=True, max_length=255)
+    job_type: str = Field(max_length=255)
+    job_role_name: str = Field(max_length=255)
+    job_location: Optional[str] = Field(default=None, max_length=255)
+    job_title: str = Field(max_length=255)
+    job_description: Optional[str] = Field(default=None)
+    job_status: str = Field(default="Open", max_length=50)
+
+
+class JobData(JobDataBase, table=True):
+    __tablename__ = "jobs_data"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+
+
+class JobCreate(JobDataBase):
+    pass
+
+
+class JobUpdate(SQLModel):
+    job_type: Optional[str] = None
+    job_role_name: Optional[str] = None
+    job_location: Optional[str] = None
+    job_title: Optional[str] = None
+    job_description: Optional[str] = None
+    job_status: Optional[str] = None
+
+
+class JobRead(JobDataBase):
+    id: int
+
+
+class TokenRefreshRequest(SQLModel):
+    refresh_token: str
+
+
+class TokenResponse(SQLModel):
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int  # Lifetime in seconds (e.g., 900 for 15 minutes)
+
+
+class UserSession(SQLModel, table=True):
+    __tablename__ = "user_sessions"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    refresh_token: str = Field(index=True, unique=True)
+    is_active: bool = Field(default=True)

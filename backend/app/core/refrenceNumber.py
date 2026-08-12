@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 from sqlmodel import Session, select, func
-from app.models import Quotation, Bill, BillItem,Project
+from app.models import Quotation, Bill, BillItem,Project,JobData
 
 
 def get_current_financial_year() -> str:
@@ -70,3 +70,26 @@ def generate_project_id(db: Session) -> str:
     total_rows = db.exec(select(func.count()).select_from(Project)).one()
     next_id = total_rows + 1
     return f"PRJ{next_id:04d}"
+
+def generate_job_id(db: Session, prefix: str = "ITS/JOB") -> str:
+    fy_str = get_current_financial_year()  # Generates e.g., "26-27"
+    search_pattern = f"{prefix}/{fy_str}/%"
+
+    statement = (
+        select(JobData)
+        .where(JobData.job_id.like(search_pattern))
+        .order_by(JobData.id.desc())
+    )
+    last_job: Optional[JobData] = db.exec(statement).first()
+
+    if not last_job or not last_job.job_id:
+        next_seq = 1
+    else:
+        try:
+            last_seq_str = last_job.job_id.split("/")[-1]
+            next_seq = int(last_seq_str) + 1
+        except (ValueError, IndexError):
+            next_seq = 1
+
+    formatted_seq = f"{next_seq:03d}"
+    return f"{prefix}/{fy_str}/{formatted_seq}"
