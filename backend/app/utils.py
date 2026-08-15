@@ -205,3 +205,41 @@ def send_temporary_credentials_email(
         server.quit()
     except Exception as e:
         raise ValueError(f"Failed to send email: {str(e)}")
+
+def send_taining_email(
+    *, email: str, name: str, subject: str, video_call_link: str, training_title: str, training_id: str
+) -> None:
+    template_path = Path(settings.EMAIL_TEMPLATES_DIR) / "training_enrollment.html"
+    template_str = template_path.read_text(encoding="utf-8")
+    
+    html_content = Template(template_str).render(
+        project_name=settings.PROJECT_NAME,
+        name=name,
+        training_title=training_title,
+        training_id=training_id,
+        video_call_link=video_call_link,
+        email=email,        
+    )
+    
+    message = MIMEMultipart("alternative")
+    message["Subject"] = f"{subject}"
+    message["From"] = f"{settings.EMAILS_FROM_NAME} <{settings.EMAILS_FROM_EMAIL}>"
+    message["To"] = email
+    
+    message.attach(MIMEText(html_content, "html"))
+    
+    try:
+        if settings.SMTP_SSL:
+            server = smtplib.SMTP_SSL(settings.SMTP_HOST, settings.SMTP_PORT)
+        else:
+            server = smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT)
+            if settings.SMTP_TLS:
+                server.starttls()
+                
+        if settings.SMTP_USER and settings.SMTP_PASSWORD:
+            server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+            
+        server.sendmail(settings.EMAILS_FROM_EMAIL, email, message.as_string())
+        server.quit()
+    except Exception as e:
+        raise ValueError(f"Failed to send email: {str(e)}")

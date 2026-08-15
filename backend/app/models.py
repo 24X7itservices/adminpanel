@@ -1599,3 +1599,12 @@ class ClientFinancialOverview(BaseModel):
     
     # Standalone Bills not tied to any project (if any)
     unassigned_bills: List[BillRead] = []
+
+
+class TrainingInvitationEmailRequest(BaseModel):
+    email: EmailStr
+    name: str
+    subject: str
+    video_call_link: str
+    training_title: str
+    training_id: str

@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ subject }}</title>
+  <style>
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      color: #334155;
+      line-height: 1.6;
+      margin: 0;
+      padding: 0;
+      background-color: #f8fafc;
+    }
+    .wrapper {
+      width: 100%;
+      background-color: #f8fafc;
+      padding: 40px 0;
+    }
+    .container {
+      max-width: 580px;
+      margin: 0 auto;
+      background: #ffffff;
+      border-radius: 12px;
+      overflow: hidden;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+      border: 1px solid #e2e8f0;
+    }
+    .header {
+      text-align: center;
+      background-color: #2563eb;
+      padding: 30px 20px;
+    }
+    .header h1 {
+      margin: 0;
+      font-size: 22px;
+      color: #ffffff;
+      font-weight: 700;
+    }
+    .body-content {
+      padding: 30px 40px;
+    }
+    .content p {
+      margin: 0 0 16px 0;
+      font-size: 15px;
+    }
+    .details-box {
+      background-color: #eff6ff;
+      border: 1px solid #dbeafe;
+      border-left: 4px solid #2563eb;
+      padding: 18px 20px;
+      margin: 20px 0;
+      border-radius: 6px;
+    }
+    .details-box h3 {
+      margin: 0 0 10px 0;
+      font-size: 15px;
+      color: #1e40af;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .details-box p {
+      margin: 6px 0;
+      font-size: 14px;
+      color: #1e3a8a;
+    }
+    .highlight {
+      font-weight: 600;
+      color: #0f172a;
+    }
+    .btn-container {
+      text-align: center;
+      margin: 30px 0 20px 0;
+    }
+    .btn {
+      display: inline-block;
+      background-color: #2563eb;
+      color: #ffffff !important;
+      padding: 14px 32px;
+      text-decoration: none;
+      border-radius: 6px;
+      font-weight: 600;
+      font-size: 15px;
+      box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.25);
+    }
+    .fallback-url {
+      background-color: #f8fafc;
+      border: 1px dashed #cbd5e1;
+      padding: 12px;
+      border-radius: 6px;
+      margin-top: 20px;
+      font-size: 12px;
+      color: #64748b;
+      word-break: break-all;
+    }
+    .fallback-url a {
+      color: #2563eb;
+      text-decoration: underline;
+    }
+    .footer {
+      margin-top: 30px;
+      padding-top: 20px;
+      border-top: 1px solid #f1f5f9;
+      font-size: 12px;
+      color: #94a3b8;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="container">
+      <div class="header">
+        <h1>Training Session Invitation</h1>
+      </div>
+      
+      <div class="body-content">
+        <div class="content">
+          <p>Hello <strong>{{ name }}</strong>,</p>
+          <p>You are receiving this email regarding your enrollment application. Please find the details for your scheduled session below:</p>
+          
+          <!-- Program Details Card -->
+          <div class="details-box">
+            <h3>Training Information</h3>
+            <p><strong>Training Program:</strong> <span class="highlight">{{ training_title }}</span></p>
+            <p><strong>Training ID:</strong> <span class="highlight">{{ training_id }}</span></p>
+            <p><strong>Registered Email:</strong> <span class="highlight">{{ email }}</span></p>
+          </div>
+
+          <!-- Video Call Button CTA -->
+          <div class="btn-container">
+            <a href="{{ video_call_link }}" class="btn" target="_blank">Join Video Call Session</a>
+          </div>
+
+          <!-- Direct Link Fallback -->
+          <div class="fallback-url">
+            Direct Session Link:<br>
+            <a href="{{ video_call_link }}" target="_blank">{{ video_call_link }}</a>
+          </div>
+        </div>
+
+        <div class="footer">
+          <p>&copy; 2026 Training Portal. All rights reserved.</p>
+          <p>If you have questions, reply directly to this email or reach out to support.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

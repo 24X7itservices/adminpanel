@@ -48,6 +48,7 @@ from reportlab.pdfgen import canvas
 from app.models import QuotationEmailRequest, TempCredentialsEmailRequest
 from app.utils import send_quotation_email
 from app.utils import send_temporary_credentials_email as send_email_util
+from app.utils import send_taining_email
 import base64
 from io import BytesIO
 from reportlab.lib.pagesizes import A4
@@ -134,7 +135,8 @@ from app.models import (
     HrStats,
     PipelineHealth,
     ClientFinancialOverview,
-    ContactForm
+    ContactForm,
+    TrainingInvitationEmailRequest
 )
 import uuid
 import aiofiles
@@ -2926,3 +2928,19 @@ def get_client_financial_overview(
         )
 
     return overview
+
+
+@app.post("/api/admin/sendTrainingInvitationEmail", tags=["SendInvitation"])
+def send_training_invitation_endpoint(payload: TrainingInvitationEmailRequest):
+    try:
+        send_taining_email(
+            email=payload.email,
+            name=payload.name,
+            subject=payload.subject,
+            video_call_link=payload.video_call_link,
+            training_title=payload.training_title,
+            training_id=payload.training_id,
+        )
+        return {"status": "success", "message": "Invitation mail sent successfully!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
