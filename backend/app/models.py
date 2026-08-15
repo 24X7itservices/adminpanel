@@ -15,6 +15,9 @@ from sqlalchemy import (
     Enum as SQLEnum,
     ForeignKey,
     func,
+    Text,
+    Date,
+    Boolean,
 )
 from sqlalchemy.orm import declarative_base
 from pydantic import field_validator
@@ -109,6 +112,7 @@ class EmployeeDataUpdate(SQLModel):
     aadhar_file_url: Optional[str] = None
     pancard_file_url: Optional[str] = None
     dl_file_url: Optional[str] = None
+    designation: Optional[str] = None
 
 
 class UpdatePassword(SQLModel):
@@ -128,7 +132,7 @@ class User(UserBase, table=True):
     email: str = Field(index=True)
     role: str = Field(max_length=50)
     gstin: Optional[str] = Field(default=None, max_length=255)
-    profile_avatar: Optional[str] = Field(default=None, max_length=255)
+    profile_avatar: Optional[str] = Field(default=None)
     created_at: Optional[datetime] = Field(
         default_factory=get_datetime_utc,
         sa_type=DateTime(timezone=True),
@@ -169,16 +173,19 @@ class UserWithEmployeeDataPublic(UserBase):
     id: int
     created_at: Optional[datetime] = None
     employee_data: Optional["EmployeeDataPublic"] = None
+    profile_avatar: Optional[str] = None
 
 
 class UserPublic(UserBase):
     id: int
     created_at: Optional[datetime] = None
+    profile_avatar: Optional[str] = None
 
 
 class UsersPublic(SQLModel):
     data: List[UserPublic]
     count: int
+    profile_avatar: Optional[str] = None
 
 
 class UserPublicMinimal(SQLModel):
@@ -240,6 +247,7 @@ class Quotation(SQLModel, table=True):
     quotation_date: Optional[str] = None
     quotation_for: Optional[str] = None
     quotation_status: str
+    created_at: Optional[datetime] = Field(default=None)
 
     # Relationships
     products: List["QuotationProduct"] = Relationship(
@@ -317,6 +325,19 @@ class QuotationCreateRequest(SQLModel):
 class QuotationStatusUpdate(BaseModel):
     quotation_status: str
 
+class QuotationRead(BaseModel):
+    id: int
+    quotation_reference_number: str
+    client_employee_id: Optional[str] = None
+    additional_offer: Optional[str] = None
+    total_amount: Optional[Union[float, str]] = None
+    quotation_date: Optional[date] = None
+    quotation_for: Optional[str] = None
+    quotation_status: Optional[str] = "Pending"
+    url_call: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
 
 # ==========================================
 # 4. CONTACT & QUOTATION REQUEST MODELS
@@ -461,6 +482,26 @@ class ProjectEmployeeDetailPublic(SQLModel):
         default=None, validation_alias="client_employee"
     )
 
+class ProjectDetailRead(BaseModel):
+    id: int
+    project_id: Optional[str] = None
+    client_employee_id: Optional[str] = None
+    quotation_reference_number: Optional[str] = None
+    project_start_date: Optional[date] = None
+    project_end_date: Optional[date] = None
+    project_status: str
+    roundup: Optional[float] = None
+    created_at: Optional[datetime] = None
+
+    # Linked Information
+    quotation: Optional[QuotationRead] = None
+    bills: List[BillRead] = []
+    payments: List[ProjectPaymentRead] = []
+
+    # Computed Metrics for this Project
+    total_billed: float = 0.00
+    total_paid: float = 0.00
+    pending_payment: float = 0.00
 
 # class ProjectEmployeeDetailPublic(SQLModel):
 #     id: int
@@ -889,6 +930,7 @@ class EmployeeDataBase(SQLModel):
     account_name: Optional[str] = Field(default=None, max_length=150)
     ifsc_code: Optional[str] = Field(default=None, max_length=20)
     account_number: Optional[str] = Field(default=None, max_length=50)
+    designation: Optional[str] = Field(default=None, max_length=50)
 
 
 class EmployeeData(EmployeeDataBase, table=True):
@@ -945,6 +987,7 @@ class ProjectPaymentRead(BaseModel):
     id: int
     amount: float
     payment_status: str
+    transaction_date: Optional[datetime] = None
     payment_date: Optional[datetime] = None
 
     class Config:
@@ -972,6 +1015,7 @@ class EmployeeDataRead(BaseModel):
     aadhar_file_url: Optional[str] = None
     pancard_file_url: Optional[str] = None
     dl_file_url: Optional[str] = None
+    designation: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -1162,11 +1206,35 @@ class BillWithItemsPublic(BillBase):
 class BillStatusUpdate(SQLModel):
     status: str = Field(..., max_length=50, description="Updated status, e.g., 'paid', 'partially_paid', 'unpaid', 'cancelled'")
 
+class BillItemRead(BaseModel):
+    id: int
+    bill_refrence_number: str
+    name: str
+    hsn: str
+    quantity: int
+    unit: str
+    price_per_unit: float
+    created_at: Optional[datetime] = None
+
+    model_config = ConfigDict(from_attributes=True)
 
 class BillRead(BillBase):
+    # id: int
+    # created_at: Optional[datetime] = None
     id: int
+    bill_refrence_number: str
+    quotation_reference_number: Optional[str] = None
+    client_employee_id: Optional[str] = None
+    total_amount: float
+    status: Optional[str] = "unpaid"
+    place_of_supply: Optional[str] = None
+    discount: Optional[float] = 0.0
+    url_call: Optional[str] = None
     created_at: Optional[datetime] = None
-    
+    items: List[BillItemRead] = []
+
+    model_config = ConfigDict(from_attributes=True)
+
 # ==========================================
 # 2. PROJECT EMPLOYEE PAYMENT
 # ==========================================
@@ -1273,6 +1341,48 @@ class JobUpdate(SQLModel):
 class JobRead(JobDataBase):
     id: int
 
+class JobRequest(Base):
+    __tablename__ = "job_requests"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    job_id = Column(String(255), index=True, nullable=False)
+    job_title = Column(String(255), nullable=True)
+    username = Column(String(255), nullable=False)
+    user_contact_number = Column(String(20), nullable=False)
+    user_email = Column(String(255), nullable=False)
+    resume_path = Column(String(255), nullable=True)
+    request_status = Column(String(50), default="Pending")
+    created_at = Column(DateTime, server_default=func.current_timestamp())
+    updated_at = Column(
+        DateTime,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp()
+    )
+
+
+# --- Pydantic Schemas ---
+class JobRequestStatusUpdate(BaseModel):
+    request_status: str
+
+class JobRequestResponse(BaseModel):
+    id: int
+    job_id: str
+    job_title: Optional[str] = None
+    username: str
+    user_contact_number: str
+    user_email: EmailStr
+    resume_path: Optional[str] = None
+    request_status: str
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+# ==========================================
+# 2. TOKEN EXTEND
+# ==========================================
+
 
 class TokenRefreshRequest(SQLModel):
     refresh_token: str
@@ -1292,3 +1402,200 @@ class UserSession(SQLModel, table=True):
     user_id: int = Field(index=True)
     refresh_token: str = Field(index=True, unique=True)
     is_active: bool = Field(default=True)
+
+
+# ==========================================
+# 2. TRAINING POSTING
+# ==========================================
+
+class Training(Base):
+    __tablename__ = "trainings"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    training_id = Column(String(50), unique=True, index=True, nullable=False)
+    training_title = Column(String(255), nullable=False)
+    training_description = Column(Text, nullable=True)
+    image = Column(String(550), nullable=True)
+    instructor_name = Column(String(150), nullable=True)
+    duration = Column(String(100), nullable=True)
+    mode = Column(String(50), nullable=True)
+    start_date = Column(Date, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, server_default=func.current_timestamp())
+    updated_at = Column(
+        DateTime,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp()
+    )
+
+
+class TrainingRequest(Base):
+    __tablename__ = "training_requests"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    training_id = Column(String(50), index=True, nullable=False)
+    username = Column(String(255), nullable=False)
+    user_contact_number = Column(String(20), nullable=False)
+    user_email = Column(String(255), nullable=False)
+    training_title = Column(String(255), nullable=True)
+    request_status = Column(String(50), default="Pending")
+    created_at = Column(DateTime, server_default=func.current_timestamp())
+    updated_at = Column(
+        DateTime,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp()
+    )
+
+
+# ==========================================
+# 2. Pydantic Schemas (Validation & Serialization)
+# ==========================================
+
+# --- Training Schemas ---
+class TrainingBase(BaseModel):
+    training_id: str
+    training_title: str
+    training_description: Optional[str] = None
+    image: Optional[str] = None
+    instructor_name: Optional[str] = None
+    duration: Optional[str] = None
+    mode: Optional[str] = None
+    start_date: Optional[date] = None
+    is_active: Optional[bool] = True
+
+
+class TrainingStatusUpdate(BaseModel):
+    is_active: bool
+
+class TrainingCreate(TrainingBase):
+    pass
+
+
+class TrainingUpdate(BaseModel):
+    training_title: Optional[str] = None
+    training_description: Optional[str] = None
+    image: Optional[str] = None
+    instructor_name: Optional[str] = None
+    duration: Optional[str] = None
+    mode: Optional[str] = None
+    start_date: Optional[date] = None
+    is_active: Optional[bool] = None
+
+
+class TrainingResponse(TrainingBase):
+    id: int
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+# --- Training Request Schemas ---
+class TrainingRequestCreate(BaseModel):
+    training_id: str
+    username: str
+    user_contact_number: str
+    user_email: EmailStr
+    training_title: Optional[str] = None
+
+
+class TrainingRequestStatusUpdate(BaseModel):
+    request_status: str
+
+
+class TrainingRequestResponse(BaseModel):
+    id: int
+    training_id: str
+    username: str
+    user_contact_number: str
+    user_email: EmailStr
+    training_title: Optional[str] = None
+    request_status: str
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+# ============================================================
+# Dashboard Response DTOs (Directly consumed by Angular)
+# ============================================================
+
+class MetricCard(BaseModel):
+    id: str
+    title: str
+    value: str
+    change: str
+    isPositive: bool
+    sparkline: str
+    badge: str
+
+class MonthlyStat(BaseModel):
+    month: str
+    revenue: float
+    quote: float
+    heightPct: float
+
+class ProjectHealth(BaseModel):
+    name: str
+    client: str
+    budget: str
+    spent: str
+    progress: int
+    status: str
+    teamAvatars: List[str]
+
+class QuickLead(BaseModel):
+    id: str
+    name: str
+    company: str
+    service: str
+    amount: str
+    urgency: str
+    time: str
+
+class HrStats(BaseModel):
+    totalEmployees: int
+    activeOnProjects: int
+    benchCount: int
+    openRecruitmentRoles: int
+    candidatesInterviewing: int
+    activeTrainingPrograms: int
+    enrolledTrainees: int
+
+class PipelineHealth(BaseModel):
+    winRate: int
+    avgTurnaround: str
+    overdueBillsAmount: str
+
+
+class ClientFinancialOverview(BaseModel):
+    # Client Basic Information
+    id: int
+    client_employee_id: Optional[str] = None
+    name: Optional[str] = None
+    email: str
+    phone: Optional[str] = None
+    profile_avatar: Optional[str] = None
+    organisation_name: Optional[str] = None
+    gstin: Optional[str] = None
+    address: Optional[str] = None
+    district: Optional[str] = None
+    state: Optional[str] = None
+    pincode: Optional[str] = None
+    is_active: bool
+    created_at: Optional[datetime] = None
+
+    # Overall Aggregate Financial Summary
+    total_projects_count: int = 0
+    overall_total_billed: float = 0.00
+    overall_total_paid: float = 0.00
+    overall_pending_payment: float = 0.00
+
+    # Individual Project Breakdowns
+    projects: List[ProjectDetailRead] = []
+    
+    # Standalone Bills not tied to any project (if any)
+    unassigned_bills: List[BillRead] = []

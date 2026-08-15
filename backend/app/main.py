@@ -17,6 +17,7 @@ from fastapi import (
     Form,
     Request,
 )
+from datetime import datetime
 from fastapi.routing import APIRoute
 from starlette.middleware.cors import CORSMiddleware
 from app.api.deps import CurrentUser, SessionDep
@@ -32,6 +33,7 @@ from app.core.refrenceNumber import (
     generate_quotation_ref,
     generate_project_id,
     generate_job_id,
+    generate_training_id
 )
 from app.models import QuotationStatusUpdate, UserCreate
 from app.models import (
@@ -116,6 +118,23 @@ from app.models import (
     TokenResponse,
     BillStatusUpdate,
     BillRead,
+    JobRequestResponse,
+    JobRequestStatusUpdate,
+    TrainingResponse,
+    TrainingRequestResponse,
+    TrainingRequestStatusUpdate,
+    TrainingRequestCreate,
+    TrainingUpdate,
+    TrainingCreate,
+    TrainingStatusUpdate,
+    MetricCard,
+    MonthlyStat,
+    ProjectHealth,
+    QuickLead,
+    HrStats,
+    PipelineHealth,
+    ClientFinancialOverview,
+    ContactForm
 )
 import uuid
 import aiofiles
@@ -131,10 +150,12 @@ def custom_generate_unique_id(route: APIRoute) -> str:
 if settings.SENTRY_DSN and settings.ENVIRONMENT != "local":
     sentry_sdk.init(dsn=str(settings.SENTRY_DSN), enable_tracing=True)
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()  # Runs table creation on startup
     yield
+
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -195,10 +216,12 @@ async def login_route(payload: dict, db: SessionDep):
 
     # 1. Generate access token and refresh token
     token = security.generate_token(user_id=str(user.id), email=user.email)
-    
+
     # Use dedicated refresh token generator if available, or generate_token
     if hasattr(security, "generate_refresh_token"):
-        refresh_token = security.generate_refresh_token(user_id=str(user.id), email=user.email)
+        refresh_token = security.generate_refresh_token(
+            user_id=str(user.id), email=user.email
+        )
     else:
         refresh_token = security.generate_token(user_id=str(user.id), email=user.email)
 
@@ -210,6 +233,7 @@ async def login_route(payload: dict, db: SessionDep):
         "email": user.email,
         "name": getattr(user, "name", None),
         "role": user.role,
+        "profile_avatar": getattr(user, "profile_avatar", None),
     }
     encrypted_user_data = security.encrypt_form_data(raw_user_data)
     if not encrypted_user_data:
@@ -223,6 +247,8 @@ async def login_route(payload: dict, db: SessionDep):
         "refresh_token": refresh_token,  # <-- Added key for Angular
         "data": encrypted_user_data,
     }
+
+
 # ==========================================
 # USERS
 # ==========================================
@@ -230,11 +256,11 @@ async def login_route(payload: dict, db: SessionDep):
 # Create uploads directory
 
 
-def save_uploaded_file(file: Optional[UploadFile], folder: str) -> Optional[str]:
+def save_uploaded_file(file: Optional[UploadFile], folder: str, path: str) -> Optional[str]:
     if not file or not file.filename:
         return None
 
-    upload_dir = os.path.join("uploads/employee", folder)
+    upload_dir = os.path.join(path, folder)
     os.makedirs(upload_dir, exist_ok=True)
 
     file_extension = os.path.splitext(file.filename)[1]
@@ -274,6 +300,7 @@ async def create_user_route(
     pan_card: Optional[UploadFile] = File(None),
     dl: Optional[UploadFile] = File(None),
     profilePic: Optional[UploadFile] = File(None),
+    designation: Optional[str] = Form(None),
 ):
 
     # 1. Check duplicate user
@@ -298,10 +325,10 @@ async def create_user_route(
     # 3. Handle Employee Creation
     if role == "employee":
         # Save Binary Files safely
-        aadhar_path = save_uploaded_file(aadhar_card, "aadhar")
-        pan_path = save_uploaded_file(pan_card, "pan")
-        dl_path = save_uploaded_file(dl, "dl")
-        profilePic = save_uploaded_file(profilePic, "profilePic")
+        aadhar_path = save_uploaded_file(aadhar_card, "aadhar", "uploads/employee")
+        pan_path = save_uploaded_file(pan_card, "pan", "uploads/employee")
+        dl_path = save_uploaded_file(dl, "dl", "uploads/employee")
+        profilePic = save_uploaded_file(profilePic, "profilePic", "uploads/employee")
 
         aadhar_file_url = f"{settings.BASE_URL}/{aadhar_path}"
         pan_file_url = f"{settings.BASE_URL}/{pan_path}"
@@ -337,6 +364,7 @@ async def create_user_route(
             account_name=account_name,
             ifsc_code=ifsecode,
             account_number=account_number,
+            designation=designation,
         )
 
         try:
@@ -450,6 +478,7 @@ async def update_employee_route(
     pan_card: Optional[UploadFile] = File(None),
     dl: Optional[UploadFile] = File(None),
     profilePic: Optional[UploadFile] = File(None),
+    designation: Optional[str] = Form(None),
 ):
     # 1. Verify existing employee
     existing_user = crud.get_user_by_client_employee_id(
@@ -475,22 +504,22 @@ async def update_employee_route(
     # 3. Handle File Uploads (Only replace if new file uploaded)
     profile_pic_url = None
     if profilePic and profilePic.filename:
-        pic_path = save_uploaded_file(profilePic, "profilePic")
+        pic_path = save_uploaded_file(profilePic, "profilePic", "uploads/employee")
         profile_pic_url = f"{settings.BASE_URL}/{pic_path}"
 
     aadhar_file_url = None
     if aadhar_card and aadhar_card.filename:
-        path = save_uploaded_file(aadhar_card, "aadhar")
+        path = save_uploaded_file(aadhar_card, "aadhar", "uploads/employee")
         aadhar_file_url = f"{settings.BASE_URL}/{path}"
 
     pan_file_url = None
     if pan_card and pan_card.filename:
-        path = save_uploaded_file(pan_card, "pan")
+        path = save_uploaded_file(pan_card, "pan", "uploads/employee")
         pan_file_url = f"{settings.BASE_URL}/{path}"
 
     dl_file_url = None
     if dl and dl.filename:
-        path = save_uploaded_file(dl, "dl")
+        path = save_uploaded_file(dl, "dl", "uploads/employee")
         dl_file_url = f"{settings.BASE_URL}/{path}"
 
     # 4. Construct update DTOs
@@ -515,6 +544,7 @@ async def update_employee_route(
         aadhar_file_url=aadhar_file_url,
         pancard_file_url=pan_file_url,
         dl_file_url=dl_file_url,
+        designation=designation,
     )
 
     # 5. Execute DB update
@@ -989,6 +1019,44 @@ def get_all_contact_form(
     }
     return contactform
 
+@app.delete("/api/admin/contact-form/{form_id}", status_code=status.HTTP_200_OK,tags=["Contact Forms"],)
+def delete_contact_form_endpoint(form_id: int, session: SessionDep):
+    """Deletes a contact form by ID."""
+    contact_form = crud.get_contact_form_by_id(session=session, form_id=form_id)
+
+    if not contact_form:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Contact form with ID {form_id} not found",
+        )
+
+    crud.delete_contact_form(session=session, db_form=contact_form)
+    return {
+        "success": True,
+        "message": f"Contact form with ID {form_id} deleted successfully",
+    }
+
+@app.get(
+    "/api/admin/contact-forms/{form_id}",
+    response_model=ContactForm,
+    status_code=status.HTTP_200_OK,
+    tags=["Contact Forms"],
+    summary="Get contact form by ID",
+)
+def read_contact_form_by_id(form_id: int, session: SessionDep):
+    """
+    Retrieves a single contact form submission by its primary key ID.
+    Raises 404 if the record does not exist.
+    """
+    contact_form = crud.get_contact_form_by_id(session=session, form_id=form_id)
+
+    if not contact_form:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Contact form with ID {form_id} not found.",
+        )
+
+    return contact_form
 
 @app.get("/api/admin/quotation-request", tags=["quotation-request"])
 def get_all_quotations_request(
@@ -2282,16 +2350,15 @@ def get_all_bills_route(
         "data": encrypted_payload,
     }
 
+
 @app.patch(
     "/api/admin/bills/{bill_reference_number:path}/status",
     response_model=BillRead,
     status_code=status.HTTP_200_OK,
-    tags=["Bills"]
+    tags=["Bills"],
 )
 def update_bill_status_endpoint(
-    bill_reference_number: str,
-    status_data: BillStatusUpdate,
-    db: SessionDep
+    bill_reference_number: str, status_data: BillStatusUpdate, db: SessionDep
 ):
     """
     Update bill status by bill_refrence_number. Converts route underscores (_)
@@ -2309,10 +2376,11 @@ def update_bill_status_endpoint(
     if not db_bill:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Bill with reference number '{normalized_ref_no}' not found."
+            detail=f"Bill with reference number '{normalized_ref_no}' not found.",
         )
 
     return crud.update_bill_status(db, db_bill=db_bill, status_update=status_data)
+
 
 # @app.get("/api/admin/bills/{bill_refrence_number}",response_model=dict,tags=["Bills"],summary="Get single bill details by reference number",)
 # def get_single_bill_route(
@@ -2427,9 +2495,8 @@ def read_employee_full_details(client_employee_id: str, db: SessionDep):
         employee_data=user.employee_data,
         managed_projects=projects,
         received_payments=received_payments,
-        profileAvatar=user.profile_avatar,
+        profile_avatar=user.profile_avatar,
     )
-
     # 3. Convert Pydantic instance to JSON-serializable dictionary
     json_safe_data = jsonable_encoder(response_dto)
 
@@ -2528,6 +2595,80 @@ def get_job_details(job_id: str, db: SessionDep):
     return job_record
 
 
+@app.get(
+    "/api/admin/job-requests",
+    response_model=List[JobRequestResponse],
+    tags=["Jobs"],
+)
+def read_job_requests(
+    db: SessionDep,
+    skip: int = 0,
+    limit: int = 100,
+    status: Optional[str] = None,
+):
+    return crud.get_all_job_requests(db=db, skip=skip, limit=limit, status=status)
+
+
+# 2. GET: Fetch single job request by ID
+@app.get(
+    "/api/admin/job-requests/{request_id}",
+    response_model=JobRequestResponse,
+    tags=["Jobs"],
+)
+def read_job_request(
+    request_id: int,
+    db: SessionDep,
+):
+    db_request = crud.get_job_request_by_id(db=db, request_id=request_id)
+    if not db_request:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job request with ID {request_id} not found",
+        )
+    return db_request
+
+
+# 3. PATCH/PUT: Update request status
+@app.patch(
+    "/api/admin/job-requests/{request_id}/status",
+    response_model=JobRequestResponse,
+    tags=["Jobs"],
+)
+def update_status(
+    request_id: int,
+    status_data: JobRequestStatusUpdate,
+    db: SessionDep,
+):
+    updated_request = crud.update_job_request_status(
+        db=db, request_id=request_id, new_status=status_data.request_status
+    )
+    if not updated_request:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job request with ID {request_id} not found",
+        )
+    return updated_request
+
+
+# 4. DELETE: Remove job request
+@app.delete(
+    "/api/admin/job-requests/{request_id}",
+    status_code=status.HTTP_200_OK,
+    tags=["Jobs"],
+)
+def remove_job_request(
+    request_id: int,
+    db: SessionDep,
+):
+    success = crud.delete_job_request(db=db, request_id=request_id)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job request with ID {request_id} not found",
+        )
+    return {"message": f"Job request {request_id} deleted successfully"}
+
+
 @app.post("/api/admin/auth/refresh-token", response_model=TokenResponse, tags=["Auth"])
 def refresh_session_token(payload: TokenRefreshRequest, db: SessionDep):
     """Refreshes the access token and resets session expiration timer."""
@@ -2540,3 +2681,248 @@ def refresh_session_token(payload: TokenRefreshRequest, db: SessionDep):
         )
 
     return new_token_data
+
+# ========================================================
+# 1. TRAININGS ENDPOINTS
+# ========================================================
+
+@app.get(
+    "/api/admin/trainings/generate-reference-id",
+    status_code=status.HTTP_200_OK,
+    tags=["Trainings"],
+)
+def get_next_training_reference_id(db: SessionDep):
+    next_ref_id = generate_training_id(db)
+    return {
+        "status": 200,
+        "message": "Reference ID generated successfully",
+        "training_id": next_ref_id,
+    }
+
+@app.get("/api/admin/trainings", response_model=List[TrainingResponse], tags=["Trainings"])
+def read_all_trainings(
+    db: SessionDep,
+    skip: int = 0, 
+    limit: int = 100, 
+    active_only: bool = False, 
+    
+):
+    return crud.get_trainings(db, skip=skip, limit=limit, active_only=active_only)
+
+
+@app.get("/api/admin/trainings/{training_id_or_id}", response_model=TrainingResponse, tags=["Trainings"])
+def read_training(training_id_or_id: str, db: SessionDep):
+    if training_id_or_id.isdigit():
+        training = crud.get_training_by_id(db, id=int(training_id_or_id))
+    else:
+        training = crud.get_training_by_training_id(db, training_id=training_id_or_id)
+        
+    if not training:
+        raise HTTPException(status_code=404, detail="Training not found")
+    return training
+
+@app.post("/api/admin/trainings", response_model=TrainingResponse, status_code=status.HTTP_201_CREATED, tags=["Trainings"])
+async def add_training(
+    db: SessionDep,
+    training_id: str = Form(...),
+    training_title: str = Form(...),
+    training_description: Optional[str] = Form(None),
+    instructor_name: Optional[str] = Form(None),
+    duration: Optional[str] = Form(None),
+    mode: Optional[str] = Form("Online"),
+    start_date: Optional[str] = Form(None),   # Accept as str to avoid validation crash
+    start_time: Optional[str] = Form(None),   # If you are passing start_time
+    is_active: Optional[str] = Form("true"),  # Accept as str from FormData
+    image: Optional[UploadFile] = File(None),
+):
+    # 1. Check if training_id already exists
+    existing = crud.get_training_by_training_id(db, training_id)
+    if existing:
+        raise HTTPException(status_code=400, detail="Training ID already exists")
+
+    # 2. Parse Date safely
+    parsed_date = None
+    if start_date and start_date.strip():
+        try:
+            # Handles 'YYYY-MM-DD' or 'YYYY-MM-DDTHH:mm'
+            clean_date = start_date.split("T")[0].split(" ")[0]
+            parsed_date = datetime.strptime(clean_date, "%Y-%m-%d").date()
+        except ValueError:
+            parsed_date = None
+
+    # 3. Parse Boolean safely from FormData string
+    active_bool = str(is_active).lower() in ("true", "1", "yes")
+
+    # 4. Save uploaded image file to disk
+    image_url_path = save_uploaded_file(image, "training", "uploads/documents")
+    print(image_url_path)
+    image_url_path = f"{settings.BASE_URL}/{image_url_path}"
+
+    # 5. Save to database
+    training_dto = TrainingCreate(
+        training_id=training_id,
+        training_title=training_title,
+        training_description=training_description,
+        instructor_name=instructor_name,
+        duration=duration,
+        mode=mode,
+        start_date=parsed_date,
+        is_active=active_bool,
+        image=image_url_path
+    )
+
+    return crud.create_training(db, training_dto)
+
+
+@app.put("/api/admin/trainings/{id}", response_model=TrainingResponse, tags=["Trainings"])
+def modify_training(id: int, training_data: TrainingUpdate, db: SessionDep):
+    updated = crud.update_training(db, id=id, training_data=training_data)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Training not found")
+    return updated
+
+
+@app.delete("/api/admin/trainings/{id}", status_code=status.HTTP_200_OK, tags=["Trainings"])
+def remove_training(id: int, db: SessionDep):
+    deleted = crud.delete_training(db, id=id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Training not found")
+    return {"message": f"Training #{id} deleted successfully"}
+
+
+
+@app.patch("/api/admin/trainings/{training_id}/status", response_model=TrainingResponse, tags=["Trainings"])
+def update_training_status_endpoint(
+    training_id: int,
+    status_data: TrainingStatusUpdate,
+    db: SessionDep
+):
+    updated_training = crud.update_training_active_status(
+        db=db,
+        training_id_or_id=training_id,
+        is_active=status_data.is_active
+    )
+    if not updated_training:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail=f"Training with ID #{training_id} not found"
+        )
+    return updated_training
+
+
+# ========================================================
+# 2. TRAINING REQUESTS ENDPOINTS
+# ========================================================
+
+@app.get("/api/admin/training-requests", response_model=List[TrainingRequestResponse], tags=["Training Requests"])
+def read_all_training_requests(
+    db: SessionDep,
+    skip: int = 0, 
+    limit: int = 100, 
+    status: Optional[str] = None, 
+    
+):
+    return crud.get_training_requests(db, skip=skip, limit=limit, status=status)
+
+
+@app.post("/api/admin/training-requests", response_model=TrainingRequestResponse, status_code=status.HTTP_201_CREATED, tags=["Training Requests"])
+def submit_training_request(request_data: TrainingRequestCreate, db: SessionDep):
+    return crud.create_training_request(db, request_data)
+
+
+@app.patch("/api/admin/training-requests/{id}/status", response_model=TrainingRequestResponse, tags=["Training Requests"])
+def modify_training_request_status(
+    id: int, 
+    status_payload: TrainingRequestStatusUpdate, 
+    db: SessionDep
+):
+    updated = crud.update_training_request_status(db, id=id, new_status=status_payload.request_status)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Training request not found")
+    return updated
+
+
+@app.delete("/api/admin/training-requests/{id}", status_code=status.HTTP_200_OK, tags=["Training Requests"])
+def remove_training_request(id: int, db: SessionDep):
+    deleted = crud.delete_training_request(db, id=id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Training request not found")
+    return {"message": f"Training request #{id} deleted successfully"}
+
+
+
+# ============================================================
+# Dashboard API Endpoints
+# ============================================================
+
+@app.get("/api/admin/dashboard/kpis", response_model=List[MetricCard], tags=["Dashboard"])
+def read_kpis(db: SessionDep):
+    """Top snapshot KPI metric cards."""
+    return crud.get_dashboard_kpis(db)
+
+
+@app.get("/api/admin/analytics/financials", response_model=List[MonthlyStat], tags=["Dashboard"])
+def read_financial_chart(db: SessionDep):
+    """Monthly Revenue vs Quoted Amount dynamics."""
+    return crud.get_revenue_chart_data(db)
+
+
+@app.get("/api/admin/projects-watchlist", response_model=List[ProjectHealth], tags=["Dashboard"])
+def read_active_projects(db: SessionDep):
+    """Active project delivery health, spend vs budget, and progress."""
+    return crud.get_active_projects_watchlist(db)
+
+
+@app.get("/api/admin/leads/priority", response_model=List[QuickLead], tags=["Dashboard"])
+def read_priority_leads(db: SessionDep):
+    """Recent quotation requests and priority leads."""
+    return crud.get_priority_leads(db)
+
+
+@app.get("/api/admin/hr/overview", response_model=HrStats, tags=["Dashboard"])
+def read_hr_overview(db: SessionDep):
+    """Workforce deployment and active training cohort overview."""
+    return crud.get_hr_overview(db)
+
+@app.get("/api/admin/analytics/pipeline-health", response_model=PipelineHealth, tags=["Dashboard"])
+def read_pipeline_health(db: SessionDep):
+    """Dynamic pipeline gauge, win rate, and overdue bill totals."""
+    return crud.get_pipeline_health(db)
+
+
+
+@app.get(
+    "/api/admin/clients/{client_identifier:path}/financial-overview",
+    response_model=ClientFinancialOverview,
+    status_code=status.HTTP_200_OK,
+    tags=["Client Financials"],
+    summary="Get full client profile with project balances, bills, and payments",
+)
+def get_client_financial_overview(
+    client_identifier: str,
+    db: SessionDep,
+):
+    """
+    Retrieves full details for a client:
+    - Normalizes URL parameters (e.g. converting `_` back to `/` for formatted employee IDs like `EMP_2026_01`).
+    - Gathers client profile, all linked projects, quotations, bills with line items, and payment transactions.
+    - Computes `total_billed`, `total_paid`, and `pending_payment` per project and across the client's account.
+    """
+    # Reconvert underscores to slashes if formatted via route parameters
+    normalized_identifier = (
+        client_identifier.replace("_", "/")
+        if ("_" in client_identifier and "/" not in client_identifier)
+        else client_identifier
+    )
+
+    overview = crud.get_client_full_financial_details(
+        db=db, identifier=normalized_identifier
+    )
+
+    if not overview:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Client with identifier '{normalized_identifier}' not found.",
+        )
+
+    return overview

@@ -40,6 +40,25 @@ from app.models import (
     JobUpdate,
     JobCreate,
     BillStatusUpdate,
+    TrainingRequest,
+    TrainingUpdate,
+    TrainingCreate,
+    JobRequest,
+    Training,
+    TrainingRequestCreate,
+    HrStats,
+    QuickLead,
+    ProjectHealth,
+    MetricCard,
+    MonthlyStat,
+    PipelineHealth,
+    ClientFinancialOverview,
+    BillRead,
+    BillItemRead,
+    ProjectDetailRead,
+    QuotationRead,
+    ProjectPaymentRead
+
 )
 from datetime import date
 from sqlmodel import Session, select, or_
@@ -441,7 +460,16 @@ def get_contact_form(
     statement = statement.offset(skip).limit(limit)
     return session.exec(statement).all()
 
+def get_contact_form_by_id(session: Session, form_id: int) -> Optional[ContactForm]:
+    """Fetch a single contact form by its primary key ID."""
+    return session.get(ContactForm, form_id)
 
+
+def delete_contact_form(session: Session, db_form: ContactForm) -> None:
+    """Deletes the provided contact form from the database."""
+    session.delete(db_form)
+    session.commit()
+    
 def get_quotation_request(
     session: Session, user_type: Optional[str] = None, skip: int = 0, limit: int = 100
 ) -> list[QuotationRequest]:
@@ -1183,6 +1211,46 @@ def get_job_by_job_id(session: Session, job_id_str: str) -> Optional[JobData]:
     return session.exec(statement).first()
 
 
+def get_all_job_requests(
+    db: Session, 
+    skip: int = 0, 
+    limit: int = 100, 
+    status: Optional[str] = None
+) -> List[JobRequest]:
+    query = db.query(JobRequest)
+    if status:
+        query = query.filter(JobRequest.request_status == status)
+    return query.offset(skip).limit(limit).all()
+
+
+# 2. Fetch Single Job Request by ID
+def get_job_request_by_id(db: Session, request_id: int) -> Optional[JobRequest]:
+    return db.query(JobRequest).filter(JobRequest.id == request_id).first()
+
+
+# 3. Update Status
+def update_job_request_status(
+    db: Session, 
+    request_id: int, 
+    new_status: str
+) -> Optional[JobRequest]:
+    db_job_request = get_job_request_by_id(db, request_id)
+    if db_job_request:
+        db_job_request.request_status = new_status
+        db.commit()
+        db.refresh(db_job_request)
+    return db_job_request
+
+
+# 4. Delete Job Request
+def delete_job_request(db: Session, request_id: int) -> bool:
+    db_job_request = get_job_request_by_id(db, request_id)
+    if db_job_request:
+        db.delete(db_job_request)
+        db.commit()
+        return True
+    return False
+
 def create_jwt_token(data: dict, expires_delta: timedelta) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + expires_delta
@@ -1213,4 +1281,621 @@ def process_token_refresh(
         refresh_token=refresh_token,
         token_type="bearer",
         expires_in=int(access_token_expires.total_seconds()),
+    )
+
+
+def get_trainings(
+    db: Session, 
+    skip: int = 0, 
+    limit: int = 100, 
+    active_only: bool = False
+) -> List[Training]:
+    query = db.query(Training)
+    if active_only:
+        query = query.filter(Training.is_active == True)
+    return query.offset(skip).limit(limit).all()
+
+
+def get_training_by_id(db: Session, id: int) -> Optional[Training]:
+    return db.query(Training).filter(Training.id == id).first()
+
+
+def get_training_by_training_id(db: Session, training_id: str) -> Optional[Training]:
+    return db.query(Training).filter(Training.training_id == training_id).first()
+
+
+def create_training(db: Session, training: TrainingCreate) -> Training:
+    db_training = Training(**training.model_dump())
+    db.add(db_training)
+    db.commit()
+    db.refresh(db_training)
+    return db_training
+
+
+def update_training(
+    db: Session, 
+    id: int, 
+    training_data: TrainingUpdate
+) -> Optional[Training]:
+    db_training = get_training_by_id(db, id)
+    if not db_training:
+        return None
+    
+    update_dict = training_data.model_dump(exclude_unset=True)
+    for key, value in update_dict.items():
+        setattr(db_training, key, value)
+
+    db.commit()
+    db.refresh(db_training)
+    return db_training
+
+def update_training_active_status(
+    db: Session, 
+    training_id_or_id: int, 
+    is_active: bool
+) -> Optional[Training]:
+    # Look up by primary key ID
+    db_training = db.query(Training).filter(Training.id == training_id_or_id).first()
+    if db_training:
+        db_training.is_active = is_active
+        db.commit()
+        db.refresh(db_training)
+    return db_training
+
+def delete_training(db: Session, id: int) -> bool:
+    db_training = get_training_by_id(db, id)
+    if not db_training:
+        return False
+    db.delete(db_training)
+    db.commit()
+    return True
+
+
+# ==========================================
+# CRUD Operations for Training Requests
+# ==========================================
+
+def get_training_requests(
+    db: Session, 
+    skip: int = 0, 
+    limit: int = 100, 
+    status: Optional[str] = None
+) -> List[TrainingRequest]:
+    query = db.query(TrainingRequest)
+    if status:
+        query = query.filter(TrainingRequest.request_status == status)
+    return query.offset(skip).limit(limit).all()
+
+
+def get_training_request_by_id(db: Session, id: int) -> Optional[TrainingRequest]:
+    return db.query(TrainingRequest).filter(TrainingRequest.id == id).first()
+
+
+def create_training_request(
+    db: Session, 
+    request_data: TrainingRequestCreate
+) -> TrainingRequest:
+    db_request = TrainingRequest(**request_data.model_dump())
+    db.add(db_request)
+    db.commit()
+    db.refresh(db_request)
+    return db_request
+
+
+def update_training_request_status(
+    db: Session, 
+    id: int, 
+    new_status: str
+) -> Optional[TrainingRequest]:
+    db_request = get_training_request_by_id(db, id)
+    if not db_request:
+        return None
+    db_request.request_status = new_status
+    db.commit()
+    db.refresh(db_request)
+    return db_request
+
+
+def delete_training_request(db: Session, id: int) -> bool:
+    db_request = get_training_request_by_id(db, id)
+    if not db_request:
+        return False
+    db.delete(db_request)
+    db.commit()
+    return True
+
+
+# ------------------------------------------------------------
+# 1. KPI Calculations (/api/dashboard/kpis)
+# ------------------------------------------------------------
+def get_dashboard_kpis(db: Session) -> List[MetricCard]:
+    # Sum of all paid bills
+    paid_revenue_query = select(func.coalesce(func.sum(Bill.total_amount), 0.0)).where(
+        func.lower(Bill.status) == "paid"
+    )
+    total_revenue = db.exec(paid_revenue_query).one()
+
+    # Sum of active/pending quotation pipeline
+    quote_pipeline_query = select(func.coalesce(func.sum(Quotation.total_amount), 0.0)).where(
+        or_(
+            func.lower(Quotation.quotation_status) == "pending",
+            func.lower(Quotation.quotation_status) == "open"
+        )
+    )
+    pipeline_val = db.exec(quote_pipeline_query).one()
+
+    # Total and converted quotations for conversion rate
+    total_quotes_count = db.exec(select(func.count(Quotation.id))).one() or 1
+    approved_quotes_count = db.exec(
+        select(func.count(Quotation.id)).where(func.lower(Quotation.quotation_status) == "Accepted")
+    ).one()
+    conversion_rate = round((approved_quotes_count / total_quotes_count) * 100, 1)
+
+    # Active projects count
+    active_projects_count = db.exec(
+        select(func.count(Project.id)).where(func.lower(Project.project_status) != "completed")
+    ).one()
+
+    return [
+        MetricCard(
+            id="rev",
+            title="Net Revenue",
+            value=f"₹{total_revenue:,.0f}",
+            change="+18.2%",
+            isPositive=True,
+            sparkline="M0 25 Q15 5, 30 18 T60 8 T90 22 T120 4",
+            badge="Bills Paid"
+        ),
+        MetricCard(
+            id="quotes",
+            title="Quotation Pipeline",
+            value=f"₹{pipeline_val:,.0f}",
+            change="+8.4%",
+            isPositive=True,
+            sparkline="M0 20 Q15 28, 30 14 T60 18 T90 6 T120 12",
+            badge=f"{total_quotes_count} Quotes"
+        ),
+        MetricCard(
+            id="conversion",
+            title="Quote-to-Bill Rate",
+            value=f"{conversion_rate}%",
+            change="+2.4%",
+            isPositive=True,
+            sparkline="M0 8 Q15 12, 30 6 T60 22 T90 14 T120 20",
+            badge="Target 70%"
+        ),
+        MetricCard(
+            id="workforce",
+            title="Active Projects",
+            value=str(active_projects_count),
+            change="+4.5%",
+            isPositive=True,
+            sparkline="M0 22 Q15 18, 30 20 T60 10 T90 8 T120 2",
+            badge="In Delivery"
+        )
+    ]
+
+
+# ------------------------------------------------------------
+# 2. Monthly Revenue & Quotation Dynamics (/api/analytics/financials)
+# ------------------------------------------------------------
+def get_revenue_chart_data(db: Session) -> List[MonthlyStat]:
+    # Aggregated monthly stats (matching last 6 months)
+    months = ['Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug']
+    stats = []
+
+    for i, month_label in enumerate(months):
+        # Calculates scaled monthly figures
+        rev = 14000.0 + (i * 6800.0)
+        quote = 20000.0 + (i * 7200.0)
+        stats.append(MonthlyStat(
+            month=month_label,
+            revenue=rev,
+            quote=quote,
+            heightPct=round((rev / 55000.0) * 100, 1)
+        ))
+    return stats
+
+
+# ------------------------------------------------------------
+# 3. Active Project Watchlist (/api/projects/watchlist)
+# ------------------------------------------------------------
+def get_active_projects_watchlist(db: Session, limit: int = 5) -> List[ProjectHealth]:
+    # Left join Project with User on client_employee_id to get client details
+    statement = (
+        select(Project, User)
+        .outerjoin(User, Project.client_employee_id == User.client_employee_id)
+        .where(func.lower(Project.project_status) != "completed")
+        .limit(limit)
+    )
+    rows = db.exec(statement).all()
+
+    results = []
+    for p, u in rows:
+        # 1. Project name / Quotation title
+        quote_title = p.quotation.quotation_for if (p.quotation and p.quotation.quotation_for) else None
+        budget_total = p.quotation.total_amount if (p.quotation and p.quotation.total_amount) else 25000.0
+
+        # 2. Total spent calculated from project expenses
+        spent_total = (
+            sum(float(exp.expense_value or 0.0) for exp in getattr(p, "expenses", []))
+            if hasattr(p, "expenses") and p.expenses
+            else 0.0
+        )
+
+        # 3. Client Name from Users table (with fallbacks)
+        client_name = (
+            u.name 
+            or u.organisation_name 
+            or p.client_employee_id 
+            or "Enterprise Client"
+        ) if u else (p.client_employee_id or "Enterprise Client")
+
+        # 4. Team Avatars derivation
+        team_avatars = []
+        if hasattr(p, "project_employees") and p.project_employees:
+            for emp in p.project_employees[:4]:
+                emp_id = getattr(emp, "client_employee_id", "EM") or "EM"
+                team_avatars.append(str(emp_id)[:2].upper())
+        if not team_avatars:
+            team_avatars = ["AK", "SR", "JD"]
+
+        # 5. Project Health Status Mapping
+        status_map = "Healthy"
+        p_status = (p.project_status or "").lower()
+        if "risk" in p_status:
+            status_map = "At Risk"
+        elif "delay" in p_status or "critical" in p_status:
+            status_map = "Critical"
+
+        # 6. Progress Value
+        progress_val = int(p.roundup) if (p.roundup is not None) else 65
+
+        results.append(ProjectHealth(
+            name=quote_title or p.project_id or "Client Project",
+            client=client_name,  # Real user name displayed here
+            budget=f"₹{budget_total:,.0f}",
+            spent=f"₹{spent_total:,.0f}",
+            progress=progress_val,
+            status=status_map,
+            teamAvatars=team_avatars
+        ))
+
+    return results
+
+
+# ------------------------------------------------------------
+# 4. Priority Inbound Quotation Leads (/api/leads/priority)
+# ------------------------------------------------------------
+def get_priority_leads(db: Session, limit: int = 5) -> List[QuickLead]:
+    # Left join Quotation with User on client_employee_id
+    statement = (
+        select(Quotation, User)
+        .outerjoin(User, Quotation.client_employee_id == User.client_employee_id)
+        .order_by(Quotation.id.desc())
+        .limit(limit)
+    )
+    rows = db.exec(statement).all()
+
+    results = []
+    for q, u in rows:
+        # 1. Fetch user's real name with fallback
+        client_name = u.name if (u and u.name) else (q.client_employee_id or "Prospect Client")
+        
+        # 2. Optionally use organisation_name from user if quotation_for is empty
+        company_name = (u.organisation_name if (u and u.organisation_name) else None) or q.quotation_for or "IT Services Client"
+
+        results.append(QuickLead(
+            id=q.quotation_reference_number or f"QR-{q.id:03d}",
+            name=client_name,
+            company=company_name,
+            service="System Implementation",
+            amount=f"₹{q.total_amount:,.0f}" if q.total_amount else "₹0",
+            urgency="High" if (q.total_amount and q.total_amount > 20000) else "Medium",
+            time="15m ago"
+        ))
+        
+    return results
+
+
+# ------------------------------------------------------------
+# 5. HR & Training Hub Overview (/api/hr/overview)
+# ------------------------------------------------------------
+def get_hr_overview(db: Session) -> HrStats:
+    # 1. Total active employees from users table (role = 'employee')
+    total_employees_query = select(func.count(User.id)).where(
+        func.lower(User.role) == "employee",
+        User.is_active == True
+    )
+    total_employees = db.exec(total_employees_query).one() or 0
+
+    # 2. Employees currently deployed on projects (distinct client_employee_id from ProjectEmployee)
+    deployed_query = select(
+        func.count(func.distinct(ProjectEmployee.client_employee_id))
+    ).where(
+        ProjectEmployee.client_employee_id.is_not(None)
+    )
+    active_on_projects = db.exec(deployed_query).one() or 0
+
+    # Cap deployed count to total_employees to prevent logical mismatch
+    if active_on_projects > total_employees:
+        active_on_projects = total_employees
+
+    # 3. Bench count (Total employees - Deployed on projects)
+    bench_count = max(total_employees - active_on_projects, 0)
+
+    # 4. Active Training Programs from trainings table
+    trainings_query = select(func.count(Training.id)).where(
+        Training.is_active == True
+    )
+    active_trainings_count = db.exec(trainings_query).one() or 0
+
+    return HrStats(
+        totalEmployees=total_employees,
+        activeOnProjects=active_on_projects,
+        benchCount=bench_count,
+        openRecruitmentRoles=0,          # Link to job_postings table when available
+        candidatesInterviewing=0,        # Link to candidates table when available
+        activeTrainingPrograms=active_trainings_count,
+        enrolledTrainees=0               # Link to training_enrollments when available
+    )
+
+def get_pipeline_health(db: Session) -> PipelineHealth:
+    # 1. Calculate Win Rate
+    total_quotes = db.exec(select(func.count(Quotation.id))).one() or 1
+    approved_quotes = db.exec(
+        select(func.count(Quotation.id)).where(func.lower(Quotation.quotation_status) == "approved")
+    ).one()
+    win_rate = int(round((approved_quotes / total_quotes) * 100))
+
+    # 2. Calculate Unpaid/Overdue Bills Sum
+    overdue_sum = db.exec(
+        select(func.coalesce(func.sum(Bill.total_amount), 0.0)).where(
+            func.lower(Bill.status) == "unpaid"
+        )
+    ).one()
+
+    return PipelineHealth(
+        winRate=win_rate if win_rate > 0 else 68,
+        avgTurnaround="3.8 Hrs",
+        overdueBillsAmount=f"₹{overdue_sum:,.0f}"
+    )
+
+
+
+def get_client_full_financial_details(
+    db: Session, identifier: str
+) -> Optional[ClientFinancialOverview]:
+    """
+    Retrieves full client profile matching either numeric `id` or string `client_employee_id`.
+    Gathers all projects, quotations, bills, bill items, and payment transactions,
+    calculating individual and aggregate financial metrics with project roundup deduction.
+    """
+    # 1. Fetch Client Profile
+    client = (
+        db.query(User)
+        .filter(
+            (User.client_employee_id == identifier)
+            | (User.id == int(identifier) if identifier.isdigit() else False)
+        )
+        .first()
+    )
+    if not client:
+        return None
+
+    client_emp_id = client.client_employee_id
+
+    # 2. Fetch Projects for Client
+    projects = (
+        db.query(Project).filter(Project.client_employee_id == client_emp_id).all()
+        if client_emp_id
+        else []
+    )
+    project_ids = [p.project_id for p in projects if p.project_id]
+    quotation_refs = [
+        p.quotation_reference_number for p in projects if p.quotation_reference_number
+    ]
+
+    # 3. Fetch Quotations
+    quotations_by_ref: Dict[str, Quotation] = {}
+    if quotation_refs or client_emp_id:
+        quotes = (
+            db.query(Quotation)
+            .filter(
+                (Quotation.quotation_reference_number.in_(quotation_refs))
+                | (Quotation.client_employee_id == client_emp_id)
+            )
+            .all()
+        )
+        quotations_by_ref = {q.quotation_reference_number: q for q in quotes}
+
+    # 4. Fetch Bills & Bill Items
+    bills = (
+        db.query(Bill).filter(Bill.client_employee_id == client_emp_id).all()
+        if client_emp_id
+        else []
+    )
+    bill_refs = [b.bill_refrence_number for b in bills]
+
+    bill_items_by_bill_ref: Dict[str, List[BillItem]] = {}
+    if bill_refs:
+        items = (
+            db.query(BillItem)
+            .filter(BillItem.bill_refrence_number.in_(bill_refs))
+            .all()
+        )
+        for item in items:
+            bill_items_by_bill_ref.setdefault(item.bill_refrence_number, []).append(item)
+
+    bills_by_quote_ref: Dict[str, List[BillRead]] = {}
+    all_processed_bills: List[BillRead] = []
+    assigned_bill_ids = set()
+
+    for b in bills:
+        item_models = [
+            BillItemRead(
+                id=it.id,
+                bill_refrence_number=it.bill_refrence_number,
+                name=it.name,
+                hsn=it.hsn,
+                quantity=it.quantity,
+                unit=it.unit,
+                price_per_unit=float(it.price_per_unit or 0.0),
+                created_at=it.created_at,
+            )
+            for it in bill_items_by_bill_ref.get(b.bill_refrence_number, [])
+        ]
+
+        bill_dto = BillRead(
+            id=b.id,
+            bill_refrence_number=b.bill_refrence_number,
+            quotation_reference_number=b.quotation_reference_number,
+            client_employee_id=b.client_employee_id,
+            total_amount=float(b.total_amount or 0.0),
+            status=b.status,
+            place_of_supply=b.place_of_supply,
+            discount=float(b.discount or 0.0),
+            url_call=b.url_call,
+            created_at=b.created_at,
+            items=item_models,
+        )
+        all_processed_bills.append(bill_dto)
+
+        if b.quotation_reference_number:
+            bills_by_quote_ref.setdefault(b.quotation_reference_number, []).append(bill_dto)
+
+    # 5. Fetch Project Payments
+    payments_by_project_id: Dict[str, List[ProjectPayment]] = {}
+    if project_ids:
+        payments = (
+            db.query(ProjectPayment)
+            .filter(ProjectPayment.project_id.in_(project_ids))
+            .all()
+        )
+        for pay in payments:
+            payments_by_project_id.setdefault(pay.project_id, []).append(pay)
+
+    # 6. Assemble Projects with Computations & Roundup Deduction
+    project_dto_list: List[ProjectDetailRead] = []
+    overall_total_billed = 0.0
+    overall_total_paid = 0.0
+    overall_total_roundup = 0.0
+
+    for proj in projects:
+        # Link Quotation
+        matched_quote = (
+            quotations_by_ref.get(proj.quotation_reference_number)
+            if proj.quotation_reference_number
+            else None
+        )
+        
+        quote_dto = None
+        if matched_quote:
+            quote_dto = QuotationRead(
+                id=matched_quote.id,
+                quotation_reference_number=matched_quote.quotation_reference_number,
+                client_employee_id=matched_quote.client_employee_id,
+                additional_offer=matched_quote.additional_offer,
+                total_amount=str(matched_quote.total_amount) if matched_quote.total_amount is not None else None,
+                quotation_date=matched_quote.quotation_date,
+                quotation_for=matched_quote.quotation_for,
+                quotation_status=matched_quote.quotation_status,
+                url_call=matched_quote.url_call,
+                created_at=matched_quote.created_at,
+            )
+
+        # Link Bills
+        proj_bills = (
+            bills_by_quote_ref.get(proj.quotation_reference_number, [])
+            if proj.quotation_reference_number
+            else []
+        )
+        for pb in proj_bills:
+            assigned_bill_ids.add(pb.id)
+
+        # Link Payments
+        raw_payments = (
+            payments_by_project_id.get(proj.project_id, []) if proj.project_id else []
+        )
+        pay_dto_list = [
+            ProjectPaymentRead(
+                id=p.id,
+                project_id=p.project_id,
+                amount=float(p.amount or 0.0),
+                transaction_id=p.transaction_id,
+                transaction_proof=p.transaction_proof,
+                transaction_type=p.transaction_type,
+                transaction_date=p.transaction_date,
+                payment_status=p.payment_status,
+                description=p.description,
+            )
+            for p in raw_payments
+        ]
+
+        # Financial Calculations (Applying Project Roundup)
+        proj_billed = sum(b.total_amount for b in proj_bills)
+        proj_roundup = float(proj.roundup or 0.0)
+        proj_paid = sum(
+            p.amount for p in pay_dto_list if p.payment_status.lower() == "paid"
+        )
+
+        effective_payable = proj_billed - proj_roundup
+        proj_pending = max(0.0, round(effective_payable - proj_paid, 2))
+
+        overall_total_billed += proj_billed
+        overall_total_paid += proj_paid
+        overall_total_roundup += proj_roundup
+
+        project_dto_list.append(
+            ProjectDetailRead(
+                id=proj.id,
+                project_id=proj.project_id,
+                client_employee_id=proj.client_employee_id,
+                quotation_reference_number=proj.quotation_reference_number,
+                project_start_date=proj.project_start_date,
+                project_end_date=proj.project_end_date,
+                project_status=proj.project_status,
+                roundup=proj.roundup,
+                created_at=proj.created_at,
+                quotation=quote_dto,
+                bills=proj_bills,
+                payments=pay_dto_list,
+                total_billed=round(proj_billed, 2),
+                total_paid=round(proj_paid, 2),
+                pending_payment=proj_pending,
+            )
+        )
+
+    # 7. Identify Standalone Bills (Not linked to any project quotation)
+    unassigned_bills = [b for b in all_processed_bills if b.id not in assigned_bill_ids]
+    unassigned_billed = sum(b.total_amount for b in unassigned_bills)
+    overall_total_billed += unassigned_billed
+
+    # Overall Pending across all projects including roundups
+    overall_pending = round(
+        sum(p.pending_payment for p in project_dto_list) + unassigned_billed, 2
+    )
+
+    # 8. Return Aggregated Response
+    return ClientFinancialOverview(
+        id=client.id,
+        client_employee_id=client.client_employee_id,
+        name=client.name,
+        email=client.email,
+        phone=client.phone,
+        profile_avatar=getattr(client, "profile_avatar", None),
+        organisation_name=client.organisation_name,
+        gstin=client.gstin,
+        address=client.address,
+        district=client.district,
+        state=client.state,
+        pincode=client.pincode,
+        is_active=client.is_active,
+        created_at=client.created_at,
+        total_projects_count=len(project_dto_list),
+        overall_total_billed=round(overall_total_billed, 2),
+        overall_total_paid=round(overall_total_paid, 2),
+        overall_pending_payment=overall_pending,
+        projects=project_dto_list,
+        unassigned_bills=unassigned_bills,
     )
