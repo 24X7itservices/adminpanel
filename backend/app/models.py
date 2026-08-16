@@ -451,8 +451,8 @@ class ProjectDetailRead(BaseModel):
     roundup: Optional[float] = None
     created_at: Optional[datetime] = None
     quotation: Optional[QuotationRead] = None
-    bills: List[BillRead] = []
-    payments: List[ProjectPaymentRead] = []
+    bills: List["BillRead"] = []
+    payments: List["ProjectPaymentRead"] = []
     total_billed: float = 0.00
     total_paid: float = 0.00
     pending_payment: float = 0.00
@@ -745,7 +745,7 @@ class Project(ProjectBase, table=True):
 class ProjectResponseWrapper(BaseModel):
     success: int
     message: str
-    data: ProjectPublic
+    data: "ProjectPublic"
 
 class ProjectCreate(ProjectBase):
     roundup: Optional[float] = None
