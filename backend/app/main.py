@@ -17,6 +17,8 @@ from fastapi import (
     Form,
     Request,
 )
+from sqlmodel import select
+from decimal import Decimal
 from datetime import datetime
 from fastapi.routing import APIRoute
 from starlette.middleware.cors import CORSMiddleware
@@ -64,7 +66,7 @@ from reportlab.platypus import (
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
-
+from fastapi import HTTPException, status as http_status
 from app.models import (
     ProjectCreate,
     ProjectUpdate,
@@ -136,7 +138,23 @@ from app.models import (
     PipelineHealth,
     ClientFinancialOverview,
     ContactForm,
-    TrainingInvitationEmailRequest
+    TrainingInvitationEmailRequest,
+    StockCreate,
+    StockUpdate,
+    StockStatusUpdate,
+    StockResponse,
+    AssetCreate,
+    AssetUpdate,
+    AssetStatusUpdate,
+    AssetResponse,
+    AccountsOverviewMetrics,
+    BankAccountCreate,
+    BankAccountRead,
+    GeneralExpenseCreate,
+    GeneralExpenseRead,
+    UnifiedTransactionRead,
+    UnlockRequest,
+    User,
 )
 import uuid
 import aiofiles
@@ -2427,6 +2445,7 @@ def get_bill_by_url_call(url_call: str, db: SessionDep):
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Bill not found",
         )
+        
     return bill
 
 
@@ -2525,23 +2544,40 @@ def read_employee_full_details(client_employee_id: str, db: SessionDep):
     tags=["Jobs"],
 )
 def get_next_job_reference_id(db: SessionDep):
-    """Generates and returns the next sequential Job Reference ID (e.g., ITS/JOB/26-27/001)."""
     next_ref_id = generate_job_id(db)
-    return {
-        "status": 200,
-        "message": "Reference ID generated successfully",
-        "job_id": next_ref_id,
-    }
+    
+    encrypted_data = security.encrypt_form_data(next_ref_id)
+    if not encrypted_data:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed.",
+        )
+
+    return {"status": 200, "message": "Refrence Fetched", "data": encrypted_data}
 
 
 @app.post(
     "/api/admin/jobs",
-    response_model=JobRead,
+    response_model=dict,
     status_code=status.HTTP_201_CREATED,
     tags=["Jobs"],
 )
 def create_new_job(job_in: JobCreate, db: SessionDep):
-    return crud.create_job(db, job_in)
+    jobs = crud.create_job(db, job_in)
+    json_safe_data = jsonable_encoder(jobs)
+    encrypted_payload = security.encrypt_form_data(json_safe_data)
+
+    if not encrypted_payload:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed.",
+        )
+    
+    return {
+        "status": status.HTTP_200_OK,
+        "message": "Job Fetched Successfully",
+        "data": encrypted_payload,
+    }
 
 
 @app.patch("/api/admin/jobs/{job_id}", response_model=JobRead, tags=["Jobs"])
@@ -2561,13 +2597,27 @@ def update_job_by_id(job_id: str, job_update: JobUpdate, db: SessionDep):
     return updated_job
 
 
-@app.get("/api/admin/jobs", response_model=List[JobRead], tags=["Jobs"])
+@app.get("/api/admin/jobs", response_model=dict, tags=["Jobs"])
 def read_all_jobs(
     db: SessionDep,
     skip: int = 0,
     limit: int = 100,
 ):
-    return crud.get_all_jobs(db, skip=skip, limit=limit)
+    jobs = crud.get_all_jobs(db, skip=skip, limit=limit)
+    json_safe_data = jsonable_encoder(jobs)
+    encrypted_payload = security.encrypt_form_data(json_safe_data)
+
+    if not encrypted_payload:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed.",
+        )
+    
+    return {
+        "status": status.HTTP_200_OK,
+        "message": "Job Fetched Successfully",
+        "data": encrypted_payload,
+    }
 
 
 @app.get(
@@ -2599,16 +2649,35 @@ def get_job_details(job_id: str, db: SessionDep):
 
 @app.get(
     "/api/admin/job-requests",
-    response_model=List[JobRequestResponse],
+    response_model=dict,
     tags=["Jobs"],
 )
 def read_job_requests(
     db: SessionDep,
     skip: int = 0,
     limit: int = 100,
-    status: Optional[str] = None,
+    job_status: Optional[str] = None,  # Renamed to avoid shadowing http_status
 ):
-    return crud.get_all_job_requests(db=db, skip=skip, limit=limit, status=status)
+    job_requests = crud.get_all_job_requests(
+        db=db, skip=skip, limit=limit, status=job_status
+    )
+
+    # 1. If job_requests is a list of ORM objects with relationships, validate via schema
+    # Otherwise jsonable_encoder handles plain ORM lists/dicts:
+    json_safe_data = jsonable_encoder(job_requests)
+    encrypted_payload = security.encrypt_form_data(json_safe_data)
+
+    if not encrypted_payload:
+        raise HTTPException(
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed.",
+        )
+    
+    return {
+        "status": http_status.HTTP_200_OK,
+        "message": "Data Fetched Successfully",
+        "data": encrypted_payload,
+    }
 
 
 # 2. GET: Fetch single job request by ID
@@ -2757,7 +2826,6 @@ async def add_training(
 
     # 4. Save uploaded image file to disk
     image_url_path = save_uploaded_file(image, "training", "uploads/documents")
-    print(image_url_path)
     image_url_path = f"{settings.BASE_URL}/{image_url_path}"
 
     # 5. Save to database
@@ -2857,39 +2925,117 @@ def remove_training_request(id: int, db: SessionDep):
 # Dashboard API Endpoints
 # ============================================================
 
-@app.get("/api/admin/dashboard/kpis", response_model=List[MetricCard], tags=["Dashboard"])
+@app.get("/api/admin/dashboard/kpis", response_model=dict, tags=["Dashboard"])
 def read_kpis(db: SessionDep):
-    """Top snapshot KPI metric cards."""
-    return crud.get_dashboard_kpis(db)
+    kpisdata = crud.get_dashboard_kpis(db)
+    json_safe_data = jsonable_encoder(kpisdata)
+    encrypted_payload = security.encrypt_form_data(json_safe_data)
+
+    if not encrypted_payload:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed.",
+        )
+    
+    return {
+        "status": status.HTTP_200_OK,
+        "message": "Data Fetched Successfully",
+        "data": encrypted_payload,
+    }
 
 
-@app.get("/api/admin/analytics/financials", response_model=List[MonthlyStat], tags=["Dashboard"])
+@app.get("/api/admin/analytics/financials", response_model=dict, tags=["Dashboard"])
 def read_financial_chart(db: SessionDep):
-    """Monthly Revenue vs Quoted Amount dynamics."""
-    return crud.get_revenue_chart_data(db)
+    finances = crud.get_revenue_chart_data(db)
+    json_safe_data = jsonable_encoder(finances)
+    encrypted_payload = security.encrypt_form_data(json_safe_data)
+
+    if not encrypted_payload:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed.",
+        )
+    
+    return {
+        "status": status.HTTP_200_OK,
+        "message": "Data Fetched Successfully",
+        "data": encrypted_payload,
+    }
 
 
-@app.get("/api/admin/projects-watchlist", response_model=List[ProjectHealth], tags=["Dashboard"])
+@app.get("/api/admin/projects-watchlist", response_model=dict, tags=["Dashboard"])
 def read_active_projects(db: SessionDep):
-    """Active project delivery health, spend vs budget, and progress."""
-    return crud.get_active_projects_watchlist(db)
+        watchlist = crud.get_active_projects_watchlist(db)
+        json_safe_data = jsonable_encoder(watchlist)
+        encrypted_payload = security.encrypt_form_data(json_safe_data)
+    
+        if not encrypted_payload:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Outbound encryption failed.",
+            )
+        
+        return {
+            "status": status.HTTP_200_OK,
+            "message": "Data Fetched Successfully",
+            "data": encrypted_payload,
+        }
 
 
-@app.get("/api/admin/leads/priority", response_model=List[QuickLead], tags=["Dashboard"])
+@app.get("/api/admin/leads/priority", response_model=dict, tags=["Dashboard"])
 def read_priority_leads(db: SessionDep):
-    """Recent quotation requests and priority leads."""
-    return crud.get_priority_leads(db)
+        priority = crud.get_priority_leads(db)
+        json_safe_data = jsonable_encoder(priority)
+        encrypted_payload = security.encrypt_form_data(json_safe_data)
+    
+        if not encrypted_payload:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Outbound encryption failed.",
+            )
+        
+        return {
+            "status": status.HTTP_200_OK,
+            "message": "Data Fetched Successfully",
+            "data": encrypted_payload,
+        }
 
 
-@app.get("/api/admin/hr/overview", response_model=HrStats, tags=["Dashboard"])
+@app.get("/api/admin/hr/overview", response_model=dict, tags=["Dashboard"])
 def read_hr_overview(db: SessionDep):
-    """Workforce deployment and active training cohort overview."""
-    return crud.get_hr_overview(db)
+    overview = crud.get_hr_overview(db)
+    json_safe_data = jsonable_encoder(overview)
+    encrypted_payload = security.encrypt_form_data(json_safe_data)
 
-@app.get("/api/admin/analytics/pipeline-health", response_model=PipelineHealth, tags=["Dashboard"])
+    if not encrypted_payload:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed.",
+        )
+    
+    return {
+        "status": status.HTTP_200_OK,
+        "message": "Data Fetched Successfully",
+        "data": encrypted_payload,
+    }
+
+@app.get("/api/admin/analytics/pipeline-health", response_model=dict, tags=["Dashboard"])
 def read_pipeline_health(db: SessionDep):
-    """Dynamic pipeline gauge, win rate, and overdue bill totals."""
-    return crud.get_pipeline_health(db)
+    pipelinehealth = crud.get_pipeline_health(db)
+    json_safe_data = jsonable_encoder(pipelinehealth)
+    encrypted_payload = security.encrypt_form_data(json_safe_data)
+
+    if not encrypted_payload:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed.",
+        )
+    
+    return {
+        "status": status.HTTP_200_OK,
+        "message": "Data Fetched Successfully",
+        "data": encrypted_payload,
+    }
 
 
 
@@ -2944,3 +3090,266 @@ def send_training_invitation_endpoint(payload: TrainingInvitationEmailRequest):
         return {"status": "success", "message": "Invitation mail sent successfully!"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to send email: {str(e)}")
+
+
+
+@app.get("/api/admin/stocks", response_model=dict, tags=["Stock"])
+def read_all_stocks( db: SessionDep, skip: int = 0, limit: int = 100,):
+    all_stocks = crud.get_all_stocks(db, skip=skip, limit=limit)
+    json_safe_data = jsonable_encoder(all_stocks)
+    encrypted_payload = security.encrypt_form_data(json_safe_data)
+
+    if not encrypted_payload:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed.",
+        )
+    
+    return {
+        "status": status.HTTP_200_OK,
+        "message": "Data Fetched Successfully",
+        "data": encrypted_payload,
+    }
+
+
+@app.post("/api/admin/stocks", response_model=StockResponse, status_code=status.HTTP_201_CREATED, tags=["Stock"])
+def create_stock_with_file(
+    db: SessionDep,
+    product_name: str = Form(...),
+    product_quantity: int = Form(0),
+    amount: Decimal = Form(...),
+    hsn_number: Optional[str] = Form(None),
+    bill_number: Optional[str] = Form(None),
+    status: Optional[str] = Form("AVAILABLE"),
+    bill_file: Optional[UploadFile] = File(None),
+    
+):
+    saved_file_path = save_uploaded_file(bill_file, "bill", "uploads/bill") if bill_file else None
+    image_url_path = f"{settings.BASE_URL}/{saved_file_path}"
+    stock_data = StockCreate(
+        product_name=product_name,
+        product_quantity=product_quantity,
+        amount=amount,
+        hsn_number=hsn_number,
+        bill_number=bill_number,
+        bill_file_path=image_url_path,
+        status=status,
+    )
+    return crud.create_stock(db, stock_data)
+
+
+@app.put("/api/admin/stocks/{stock_id}", response_model=StockResponse, tags=["Stock"])
+def update_stock_with_file(
+    db: SessionDep,
+    stock_id: int,
+    product_name: Optional[str] = Form(None),
+    product_quantity: Optional[int] = Form(None),
+    amount: Optional[Decimal] = Form(None),
+    hsn_number: Optional[str] = Form(None),
+    bill_number: Optional[str] = Form(None),
+    status: Optional[str] = Form(None),
+    bill_file: Optional[UploadFile] = File(None),
+    
+):
+    saved_file_path = save_uploaded_file(bill_file, "bill", "uploads/bill") if bill_file else None
+    image_url_path = f"{settings.BASE_URL}/{saved_file_path}"
+
+    update_payload = StockUpdate(
+        product_name=product_name,
+        product_quantity=product_quantity,
+        amount=amount,
+        hsn_number=hsn_number,
+        bill_number=bill_number,
+        status=status,
+        bill_file_path=image_url_path,
+    )
+    updated = crud.update_stock(db, stock_id, update_payload)
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Stock item not found"
+        )
+    return updated
+
+
+@app.patch("/api/admin/stocks/{stock_id}/status", response_model=StockResponse, tags=["Stock"])
+def change_stock_status(
+    stock_id: int,
+    status_payload: StockStatusUpdate,
+    db: SessionDep,
+):
+    updated = crud.update_stock_status(db, stock_id, status_payload)
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Stock item not found"
+        )
+    return updated
+
+
+@app.delete("/api/admin/stocks/{stock_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Stock"])
+def remove_stock(stock_id: int, db: SessionDep,):
+    deleted = crud.delete_stock(db, stock_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Stock item not found"
+        )
+    return None
+
+
+@app.get("/api/admin/assets", response_model=List[AssetResponse], tags=["Assets"])
+def read_all_assets(
+    db: SessionDep, skip: int = 0, limit: int = 100,
+):
+    return crud.get_all_assets(db, skip=skip, limit=limit)
+
+
+@app.post(
+    "/api/admin/assets",
+    response_model=AssetResponse,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Assets"]
+)
+def create_asset_with_file(
+    db: SessionDep,
+    name: str = Form(...),
+    amount: Decimal = Form(...),
+    bill_number: Optional[str] = Form(None),
+    status: Optional[str] = Form("ACTIVE"),
+    bill_file: Optional[UploadFile] = File(None),
+):
+    saved_file_path = save_uploaded_file(bill_file, "bill", "uploads/bill") if bill_file else None
+    image_url_path = f"{settings.BASE_URL}/{saved_file_path}"
+
+    asset_data = AssetCreate(
+        name=name,
+        amount=amount,
+        bill_number=bill_number,
+        bill_file_path=image_url_path,
+        status=status,
+    )
+    return crud.create_asset(db, asset_data)
+
+
+@app.put("/api/admin/assets/{asset_id}", response_model=AssetResponse, tags=["Assets"])
+def update_asset_with_file(
+    db: SessionDep,
+    asset_id: int,
+    name: Optional[str] = Form(None),
+    amount: Optional[Decimal] = Form(None),
+    bill_number: Optional[str] = Form(None),
+    status: Optional[str] = Form(None),
+    bill_file: Optional[UploadFile] = File(None),
+):
+    saved_file_path = save_uploaded_file(bill_file, "bill", "uploads/bill") if bill_file else None
+    image_url_path = f"{settings.BASE_URL}/{saved_file_path}"
+
+    update_payload = AssetUpdate(
+        name=name,
+        amount=amount,
+        bill_number=bill_number,
+        status=status,
+        bill_file_path=image_url_path,
+    )
+    updated = crud.update_asset(db, asset_id, update_payload)
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found"
+        )
+    return updated
+
+
+@app.patch("/api/admin/assets/{asset_id}/status", response_model=AssetResponse, tags=["Assets"])
+def change_asset_status(
+    asset_id: int,
+    status_payload: AssetStatusUpdate,
+    db: SessionDep,
+):
+    updated = crud.update_asset_status(db, asset_id, status_payload)
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found"
+        )
+    return updated
+
+
+@app.delete("/api/admin/assets/{asset_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Assets"])
+def remove_asset(asset_id: int, db: SessionDep,):
+    deleted = crud.delete_asset(db, asset_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found"
+        )
+    return None
+
+
+@app.get("/api/admin/metrics", response_model=AccountsOverviewMetrics, tags=["Accounts"])
+def read_accounts_metrics(db: SessionDep,):
+    return crud.get_accounts_overview(db)
+
+
+@app.get("/api/admin/ledger", response_model=List[UnifiedTransactionRead], tags=["Accounts"])
+def read_ledger(db: SessionDep,limit: int = 50, ):
+    return crud.get_unified_ledger(db, limit=limit)
+
+
+@app.get("/api/admin/banks", response_model=List[BankAccountRead], tags=["Accounts"])
+def read_bank_accounts(db: SessionDep,):
+    return crud.get_bank_accounts(db)
+
+
+@app.post("/api/admin/banks", response_model=BankAccountRead, tags=["Accounts"])
+def create_bank(account: BankAccountCreate, db: SessionDep,):
+    return crud.create_bank_account(db, account)
+
+
+@app.get("/api/admin/expenses/general", response_model=List[GeneralExpenseRead], tags=["Accounts"])
+def read_general_expenses(db: SessionDep,):
+    return crud.get_general_expenses(db)
+
+
+@app.post("/api/admin/expenses/general", response_model=GeneralExpenseRead, tags=["Accounts"])
+def create_expense(
+    expense: GeneralExpenseCreate, db: SessionDep,
+):
+    return crud.create_general_expense(db, expense)
+
+@app.post("/api/admin/unlock-screen", tags=["Auth"])
+def unlock_screen(payload: UnlockRequest, db: SessionDep):
+    if not payload.identifier or not payload.password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Identifier and password are required.",
+        )
+
+    is_valid = crud.verify_user_lock_password(
+        db, payload.identifier, payload.password
+    )
+    if not is_valid:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect password. Please try again.",
+        )
+
+    return {"success": True, "message": "Screen unlocked successfully"}
+
+
+@app.get("/api/admin/user-info/{identifier}", tags=["Auth"])
+def get_user_lock_info(identifier: str, db: SessionDep):
+    # Lookup by id or email or client_employee_id
+    query = select(User)
+    if identifier.isdigit():
+        query = query.where(User.id == int(identifier))
+    else:
+        query = query.where(User.email == identifier)
+    
+    user = db.exec(query).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    return {
+        "id": user.id,
+        "name": user.name or "Administrator",
+        "email": user.email,
+        "role": user.role or "admin",
+        "profile_avatar": user.profile_avatar  # URL or base64 from users table
+    }
+

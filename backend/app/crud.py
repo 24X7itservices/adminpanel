@@ -57,10 +57,26 @@ from app.models import (
     BillItemRead,
     ProjectDetailRead,
     QuotationRead,
-    ProjectPaymentRead
-
+    ProjectPaymentRead,
+    StockStatusUpdate,
+    Stock,
+    StockCreate,
+    StockUpdate,
+    Asset, 
+    AssetCreate, 
+    AssetUpdate, 
+    AssetStatusUpdate,
+    AccountsOverviewMetrics,
+    BankAccount,
+    BankAccountCreate,
+    GeneralExpense,
+    GeneralExpenseCreate,
+    TransactionType,
+    UnifiedTransactionRead,
+    PaymentStatus,
 )
 from datetime import date
+from decimal import Decimal
 from sqlmodel import Session, select, or_
 from sqlalchemy.orm import selectinload
 from app.models import Project, ProjectEmployee
@@ -1899,3 +1915,298 @@ def get_client_full_financial_details(
         projects=project_dto_list,
         unassigned_bills=unassigned_bills,
     )
+
+
+def get_all_stocks(
+    db: Session, skip: int = 0, limit: int = 100
+) -> List[Stock]:
+    return db.query(Stock).offset(skip).limit(limit).all()
+
+
+def get_stock_by_id(db: Session, stock_id: int) -> Optional[Stock]:
+    return db.query(Stock).filter(Stock.id == stock_id).first()
+
+
+def create_stock(db: Session, stock: StockCreate) -> Stock:
+    db_stock = Stock(**stock.model_dump())
+    db.add(db_stock)
+    db.commit()
+    db.refresh(db_stock)
+    return db_stock
+
+
+def update_stock(
+    db: Session, stock_id: int, stock_update: StockUpdate
+) -> Optional[Stock]:
+    db_stock = get_stock_by_id(db, stock_id)
+    if not db_stock:
+        return None
+
+    update_data = stock_update.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(db_stock, key, value)
+
+    db.commit()
+    db.refresh(db_stock)
+    return db_stock
+
+
+def update_stock_status(
+    db: Session, stock_id: int, status_update: StockStatusUpdate
+) -> Optional[Stock]:
+    db_stock = get_stock_by_id(db, stock_id)
+    if not db_stock:
+        return None
+
+    db_stock.status = status_update.status
+    db.commit()
+    db.refresh(db_stock)
+    return db_stock
+
+
+def delete_stock(db: Session, stock_id: int) -> Optional[Stock]:
+    db_stock = get_stock_by_id(db, stock_id)
+    if not db_stock:
+        return None
+
+    db.delete(db_stock)
+    db.commit()
+    return db_stock
+
+def get_all_assets(
+    db: Session, skip: int = 0, limit: int = 100
+) -> List[Asset]:
+    return db.query(Asset).offset(skip).limit(limit).all()
+
+
+def get_asset_by_id(db: Session, asset_id: int) -> Optional[Asset]:
+    return db.query(Asset).filter(Asset.id == asset_id).first()
+
+
+def create_asset(db: Session, asset: AssetCreate) -> Asset:
+    db_asset = Asset(**asset.model_dump())
+    db.add(db_asset)
+    db.commit()
+    db.refresh(db_asset)
+    return db_asset
+
+
+def update_asset(
+    db: Session, asset_id: int, asset_update: AssetUpdate
+) -> Optional[Asset]:
+    db_asset = get_asset_by_id(db, asset_id)
+    if not db_asset:
+        return None
+
+    update_data = asset_update.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(db_asset, key, value)
+
+    db.commit()
+    db.refresh(db_asset)
+    return db_asset
+
+
+def update_asset_status(
+    db: Session, asset_id: int, status_update: AssetStatusUpdate
+) -> Optional[Asset]:
+    db_asset = get_asset_by_id(db, asset_id)
+    if not db_asset:
+        return None
+
+    db_asset.status = status_update.status
+    db.commit()
+    db.refresh(db_asset)
+    return db_asset
+
+
+def delete_asset(db: Session, asset_id: int) -> Optional[Asset]:
+    db_asset = get_asset_by_id(db, asset_id)
+    if not db_asset:
+        return None
+
+    db.delete(db_asset)
+    db.commit()
+    return db_asset
+
+
+def create_bank_account(db: Session, account: BankAccountCreate) -> BankAccount:
+    db_obj = BankAccount.model_validate(account)
+    db_obj.current_balance = db_obj.opening_balance
+    db.add(db_obj)
+    db.commit()
+    db.refresh(db_obj)
+    return db_obj
+
+
+def get_bank_accounts(db: Session) -> List[BankAccount]:
+    return db.exec(select(BankAccount)).all()
+
+
+def create_general_expense(
+    db: Session, expense: GeneralExpenseCreate
+) -> GeneralExpense:
+    db_obj = GeneralExpense.model_validate(expense)
+    db.add(db_obj)
+    db.commit()
+    db.refresh(db_obj)
+    return db_obj
+
+
+def get_general_expenses(db: Session) -> List[GeneralExpense]:
+    return db.exec(
+        select(GeneralExpense).order_by(GeneralExpense.expense_date.desc())
+    ).all()
+
+
+def get_accounts_overview(db: Session) -> AccountsOverviewMetrics:
+    # 1. Total Income: Project payments received from clients
+    client_pmts = db.exec(
+        select(func.coalesce(func.sum(ProjectPayment.amount), 0)).where(
+            ProjectPayment.payment_status == "Paid"
+        )
+    ).one()
+    total_income = Decimal(str(client_pmts))
+
+    # 2. Total Expenses: Direct project expenses + Disbursed employee payouts
+    proj_exp = db.exec(
+        select(func.coalesce(func.sum(ProjectExpense.expense_value), 0))
+    ).one()
+    
+    emp_payouts = db.exec(
+        select(func.coalesce(func.sum(ProjectPaymentEmployee.amount), 0)).where(
+            ProjectPaymentEmployee.payment_status == PaymentStatus.COMPLETED
+        )
+    ).one()
+    
+    total_expenses = Decimal(str(proj_exp)) + Decimal(str(emp_payouts))
+
+    # 3. Pending Receivables: Unpaid customer bills
+    unpaid_bills = db.exec(
+        select(func.coalesce(func.sum(Bill.total_amount), 0)).where(
+            Bill.status == "unpaid"
+        )
+    ).one()
+    pending_receivables = Decimal(str(unpaid_bills))
+
+    # 4. Pending Payables: Pending payouts for employees
+    pending_payouts = db.exec(
+        select(func.coalesce(func.sum(ProjectPaymentEmployee.amount), 0)).where(
+            ProjectPaymentEmployee.payment_status == PaymentStatus.PENDING
+        )
+    ).one()
+    pending_payables = Decimal(str(pending_payouts))
+
+    return AccountsOverviewMetrics(
+        total_income=total_income,
+        total_expenses=total_expenses,
+        net_profit=total_income - total_expenses,
+        pending_receivables=pending_receivables,
+        pending_payables=pending_payables,
+    )
+
+
+def get_unified_ledger(db: Session, limit: int = 100) -> List[UnifiedTransactionRead]:
+    transactions: List[UnifiedTransactionRead] = []
+
+    # 1. Inflow: Client Payments
+    client_payments = db.exec(select(ProjectPayment)).all()
+    for cp in client_payments:
+        transactions.append(
+            UnifiedTransactionRead(
+                id=f"CP-{cp.id}",
+                date=cp.created_at,
+                title=f"Project Payment ({cp.project_id})",
+                reference_id=cp.transaction_id,
+                party_name=cp.project_id,
+                type="Income",
+                amount=Decimal(str(cp.amount)),
+                status=cp.payment_status,
+                source="Client Payment",
+            )
+        )
+
+    # 2. Outflow: Project Direct Expenses
+    project_expenses = db.exec(select(ProjectExpense)).all()
+    for pe in project_expenses:
+        transactions.append(
+            UnifiedTransactionRead(
+                id=f"PE-{pe.id}",
+                date=pe.expense_date,
+                title=pe.expense_type,
+                reference_id=pe.project_id,
+                party_name=pe.project_id,
+                type="Expense",
+                amount=pe.expense_value,
+                status="Paid",
+                source="Project Expense",
+            )
+        )
+
+    # 3. Outflow: Employee Payouts
+    emp_payouts = db.exec(select(ProjectPaymentEmployee)).all()
+    for ep in emp_payouts:
+        status_val = ep.payment_status.value if hasattr(ep.payment_status, "value") else str(ep.payment_status)
+        transactions.append(
+            UnifiedTransactionRead(
+                id=f"EP-{ep.id}",
+                date=ep.payment_date or ep.created_at,
+                title=f"Salary/Disbursement ({ep.project_id})",
+                reference_id=ep.transaction_id,
+                party_name=ep.client_employee_id or "Employee",
+                type="Expense",
+                amount=Decimal(str(ep.amount)),
+                status=status_val,
+                source="Employee Payout",
+            )
+        )
+
+    # Sort newest first
+    transactions.sort(
+        key=lambda x: x.date if x.date else datetime.min, reverse=True
+    )
+    return transactions[:limit]
+
+
+def verify_user_lock_password(
+    db: Session, identifier: str, password: str
+) -> bool:
+    query = db.query(User)
+
+    # Allow lookup by numeric user ID, email, or client_employee_id
+    if identifier.isdigit():
+        db_user = query.filter(
+            or_(
+                User.id == int(identifier),
+                User.email == identifier,
+                User.client_employee_id == identifier,
+            )
+        ).first()
+    else:
+        db_user = query.filter(
+            or_(
+                User.email == identifier,
+                User.client_employee_id == identifier,
+            )
+        ).first()
+
+    # Timing-attack protection if user not found
+    if not db_user:
+        SecurityService.verify_password(password, DUMMY_HASH)
+        return False
+
+    verified, updated_password_hash = SecurityService.verify_password(
+        password, db_user.password
+    )
+
+    if not verified:
+        return False
+
+    # Auto-update hash if algorithm/work factor was upgraded
+    if updated_password_hash:
+        db_user.password = updated_password_hash
+        db.add(db_user)
+        db.commit()
+        db.refresh(db_user)
+
+    return True
