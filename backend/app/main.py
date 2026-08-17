@@ -68,6 +68,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
 from fastapi import HTTPException, status as http_status
 from app.models import (
+    UpdatePassword,
     ProjectCreate,
     ProjectUpdate,
     ProjectPublic,
@@ -157,6 +158,7 @@ from app.models import (
     User,
 )
 import uuid
+import shutil
 import aiofiles
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, status
 from fastapi.staticfiles import StaticFiles
@@ -701,6 +703,100 @@ def update_user_by_employee_id(
         "data": encrypted_data,
     }
 
+@app.patch(
+    "/api/admin/changepassword/{client_employee_id}",
+    tags=["Users"],
+    status_code=status.HTTP_200_OK,
+)
+def change_user_password(
+    client_employee_id: str,
+    payload: UpdatePassword,
+    db: SessionDep,
+):
+    # 1. Authenticate using the email and current password from payload
+    user = crud.authenticate(
+        session=db,
+        email=payload.email,
+        password=payload.current_password,
+    )
+    print("Email",payload.email)
+    print("Password",payload.current_password)
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Invalid email or current password.",
+        )
+
+    # Optional: Verify the authenticated user matches the client_employee_id in URL
+    if user.client_employee_id != client_employee_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have permission to modify this user account.",
+        )
+
+    # 2. Update to new password
+    updated_user = crud.update_password(
+        session=db,
+        db_user=user,
+        new_password=payload.new_password,
+    )
+
+    # 3. Prepare response and encrypt
+    user_dict = jsonable_encoder(updated_user)
+    user_dict.pop("password", None)
+
+    encrypted_data = security.encrypt_form_data(user_dict)
+    if not encrypted_data:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed.",
+        )
+
+    return {
+        "status": 200,
+        "message": "Password changed successfully.",
+        "data": encrypted_data,
+    }
+
+
+# 3. Upload Profile Image / Avatar
+@app.post(
+    "/api/admin/uploadavatar/{client_employee_id}",
+    tags=["Users"],
+    status_code=status.HTTP_200_OK,
+)
+async def upload_avatar(
+    client_employee_id: str,
+    db: SessionDep,
+    file: UploadFile = File(...),
+):
+    
+    
+    avatar_url =  save_uploaded_file(file, "", "uploads/avatars")
+    avatar_url = f"{settings.BASE_URL}/{avatar_url}"
+
+    updated_user = crud.update_profile_avatar(
+        session=db,
+        client_employee_id=client_employee_id,
+        avatar_relative_path=avatar_url,
+    )
+
+    user_dict = jsonable_encoder(updated_user)
+    user_dict.pop("password", None)
+    
+    encrypted_data = security.encrypt_form_data(user_dict)
+    if not encrypted_data:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Outbound encryption failed.",
+        )
+
+    return {
+        "status": 200,
+        "message": "Avatar updated successfully.",
+        "data": encrypted_data,
+    }
 
 class EncryptedFormEnvelope(BaseModel):
     formData: dict

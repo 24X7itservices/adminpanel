@@ -9,6 +9,7 @@ from app.models import User, UserCreate, UserUpdate
 from app.models import Quotation, QuotationProduct, QuotationCreateRequest
 from app.models import ContactForm, QuotationRequest, QuotationRequestPublic
 from app.models import (
+    UpdatePassword,
     Project,
     ProjectCreate,
     ProjectUpdate,
@@ -145,6 +146,32 @@ def update_user(*, session: Session, db_user: User, user_in: UserUpdate) -> Any:
     session.refresh(db_user)
     return db_user
 
+def update_password(*, session: Session, db_user: User, new_password: str) -> User:
+    db_user.password = SecurityService.get_password_hash(new_password)
+    session.add(db_user)
+    session.commit()
+    session.refresh(db_user)
+    return db_user
+
+
+def update_profile_avatar(
+    *, session: Session, client_employee_id: str, avatar_relative_path: str
+) -> User:
+    db_user = get_user_by_client_employee_id(
+        session=session, client_employee_id=client_employee_id
+    )
+    if not db_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    db_user.profile_avatar = avatar_relative_path
+    
+    session.add(db_user)
+    session.commit()
+    session.refresh(db_user)
+    return db_user
 
 def update_user_status(
     session: Session, client_employee_id: str, is_active: bool
