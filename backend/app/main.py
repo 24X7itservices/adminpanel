@@ -17,12 +17,13 @@ from fastapi import (
     Form,
     Request,
 )
-from sqlmodel import select
+
+from sqlmodel import select, desc
 from decimal import Decimal
 from datetime import datetime
 from fastapi.routing import APIRoute
 from starlette.middleware.cors import CORSMiddleware
-from app.api.deps import CurrentUser, SessionDep
+from app.api.deps import CurrentUser, SessionDep, get_current_user
 from app.core.config import settings
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -68,6 +69,8 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
 from fastapi import HTTPException, status as http_status
 from app.models import (
+    AcceptProjectRequest,
+    Notification,
     UpdatePassword,
     EmployeeUpdatePermissions,
     ProjectCreate,
@@ -708,7 +711,19 @@ def read_user_by_employee_id(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"User with client_employee_id '{client_employee_id}' not found.",
         )
-    encrypted_data = security.encrypt_form_data(jsonable_encoder(user))
+
+    # 1. Convert user model to dictionary excluding sensitive columns
+    user_dict = user.model_dump(exclude={"password"})
+
+    # 2. Attach employee_data if user is an employee
+    if getattr(user, "role", "").lower() == "employee":
+        if user.employee_data:
+            user_dict["employee_data"] = user.employee_data.model_dump()
+        else:
+            user_dict["employee_data"] = None
+
+    # 3. Encrypt outbound payload
+    encrypted_data = security.encrypt_form_data(jsonable_encoder(user_dict))
 
     if not encrypted_data:
         raise HTTPException(
@@ -1809,22 +1824,31 @@ async def create_project(
     request: Request, payload: EncryptedFormEnvelope, db: SessionDep
 ):
     try:
-        project_id = generate_project_id(db)
+        project_id_str = generate_project_id(db)
         decrypted_data = security.decrypt_form_data(payload.model_dump())
+        
         if not decrypted_data:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Security verification failed. Invalid encryption envelope.",
             )
-        decrypted_data["project_id"] = project_id
-        decrypted_data["roundup"] = 0
+
+        decrypted_data["project_id"] = project_id_str
+        decrypted_data["roundup"] = decrypted_data.get("roundup", 0)
+
+        # Passes is_state, is_district, and commissions list
         project_create = ProjectCreate(**decrypted_data)
         assigned = crud.create_project(db=db, project_create=project_create)
+
         return {
             "success": 201,
             "message": "Project Created successfully",
             "data": assigned,
         }
+
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as e:
         db.rollback()
         raise HTTPException(
@@ -3522,3 +3546,66 @@ def fetch_employee_projects(client_employee_id: str, db: SessionDep):
             status_code=404, detail="No projects found for the given employee ID"
         )
     return data
+
+
+@app.get("/notifications/unread",tags=["Notification"])
+def get_unread_notifications(db: SessionDep, current_user: User = Depends(get_current_user)):
+    statement = (
+        select(Notification)
+        .where(
+            Notification.user_id == current_user.id,
+            Notification.read_at == None
+        )
+        .order_by(desc(Notification.created_at))
+        .limit(10)
+    )
+    return db.exec(statement).all()
+
+@app.patch("/notifications/{notification_id}/read",tags=["Notification"])
+def mark_notification_as_read(notification_id: int, db: SessionDep, current_user: User = Depends(get_current_user)):
+    notif = db.get(Notification, notification_id)
+    if not notif or notif.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found")
+    
+    notif.read_at = datetime.utcnow()
+    db.add(notif)
+    db.commit()
+    return {"success": True}
+
+
+@app.get("/available-projects",tags=["Employee Dashboard"])
+def get_available_projects(
+    db: SessionDep, 
+    current_user: User = Depends(get_current_user)
+):
+    return crud.get_available_projects_for_employee(db=db, employee=current_user)
+
+@app.post("/accept-project", status_code=status.HTTP_201_CREATED,tags=["Employee Dashboard"])
+def accept_project(
+    payload: AcceptProjectRequest,
+    db: SessionDep,
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        assignment = crud.accept_project_by_employee(
+            db=db,
+            project_id=payload.project_id,
+            employee_client_id=current_user.client_employee_id,
+            visit_date=payload.visit_date,
+            visit_time=payload.visit_time,
+            notes=payload.notes
+        )
+        return {
+            "success": True,
+            "message": "Project accepted successfully and visit recorded.",
+            "data": assignment
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to accept project: {str(e)}"
+        )

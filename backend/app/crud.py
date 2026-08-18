@@ -8,6 +8,7 @@ from app.core.security import SecurityService
 from app.models import User, UserCreate, UserUpdate
 from app.models import Quotation, QuotationProduct, QuotationCreateRequest
 from app.models import ContactForm, QuotationRequest, QuotationRequestPublic
+import json
 from app.models import (
     UpdatePassword,
     Project,
@@ -75,6 +76,8 @@ from app.models import (
     TransactionType,
     UnifiedTransactionRead,
     PaymentStatus,
+    ProjectCommission,
+    Notification,
 )
 from datetime import date
 from decimal import Decimal
@@ -194,7 +197,11 @@ def update_user_status(
 def get_user_by_client_employee_id(
     session: Session, client_employee_id: str
 ) -> Optional[User]:
-    statement = select(User).where(User.client_employee_id == client_employee_id)
+    statement = (
+        select(User)
+        .where(User.client_employee_id == client_employee_id)
+        .options(selectinload(User.employee_data))  # Eagerly load the relationship
+    )
     return session.exec(statement).first()
 
 
@@ -633,14 +640,86 @@ def get_projects(db: Session, skip: int = 0, limit: int = 100) -> List[Project]:
 
 
 def create_project(db: Session, project_create: ProjectCreate) -> Project:
-    # Convert incoming schema to dictionary and pass as kwargs
-    project_data = project_create.model_dump(exclude_unset=True)
-    db_project = Project(**project_data)
+    # 1. Exclude non-DB payload attributes
+    is_state = bool(project_create.is_state)
+    is_district = bool(project_create.is_district)
+    
+    project_data = project_create.model_dump(
+        exclude={"commissions", "is_state", "is_district"}, 
+        exclude_unset=True
+    )
+    commissions_data = project_create.commissions or []
 
+    # 2. Save base project
+    db_project = Project(**project_data)
     if not db_project.project_status:
         db_project.project_status = "Pending"
 
     db.add(db_project)
+    db.flush()  # Generates db_project.id
+
+    # 3. Create commission records linked to project
+    for item in commissions_data:
+        commission_obj = ProjectCommission(
+            project_id=db_project.id,
+            commission_name=item.commission_name,
+            commission_amount=item.amount,
+        )
+        db.add(commission_obj)
+
+    # 4. Find the client and send matching notifications
+    if (is_state or is_district) and db_project.client_employee_id:
+        # Fetch client details to get their state and district
+        client_statement = select(User).where(User.client_employee_id == db_project.client_employee_id)
+        client_user = db.exec(client_statement).first()
+
+        if client_user:
+            filters = []
+            
+            if is_state and client_user.state:
+                filters.append(User.state == client_user.state)
+                
+            if is_district and client_user.district:
+                filters.append(User.district == client_user.district)
+
+            # If valid filter conditions exist, query matching active employees
+            if filters:
+                employee_statement = (
+                    select(User)
+                    .where(
+                        User.role == "employee",
+                        User.is_active == True,
+                        or_(*filters)
+                    )
+                )
+                target_employees = db.exec(employee_statement).all()
+
+                # Build notification payload and create notification rows
+                notif_payload = json.dumps({
+                    "project_id": db_project.project_id,
+                    "db_id": db_project.id,
+                    "quotation_ref": db_project.quotation_reference_number,
+                    "client_name": client_user.name or client_user.organisation_name or "Client",
+                    "state": client_user.state,
+                    "district": client_user.district,
+                    "url": f"/projects"
+                })
+
+                for emp in target_employees:
+                    if emp.id:
+                        notif = Notification(
+                            user_id=emp.id,
+                            type="project",
+                            title="New Project Available in Your Area",
+                            message=f"New project '{db_project.project_id}' is available in {client_user.district or client_user.state or 'your region'}.",
+                            payload=notif_payload,
+                            priority="high",
+                            channel="in_app",
+                            status="sent"
+                        )
+                        db.add(notif)
+
+    # 5. Commit everything in a single atomic transaction
     db.commit()
     db.refresh(db_project)
     return db_project
@@ -2351,3 +2430,110 @@ def get_today_follow_ups(db: Session):
         })
 
     return result
+
+def get_available_projects_for_employee(db: Session, employee: User) -> List[Dict[str, Any]]:
+    # Subquery: Count accepted employees per project
+    accepted_counts = (
+        select(
+            ProjectEmployee.project_id,
+            func.count(ProjectEmployee.id).label("emp_count")
+        )
+        .group_by(ProjectEmployee.project_id)
+        .subquery()
+    )
+
+    # Fetch projects where accepted employees < 3, location matches employee, and current employee hasn't accepted yet
+    statement = (
+        select(
+            Project,
+            User.district,
+            User.state,
+            User.name.label("client_name"),
+            User.organisation_name
+        )
+        .join(User, Project.client_employee_id == User.client_employee_id)
+        .outerjoin(accepted_counts, Project.project_id == accepted_counts.c.project_id)
+        .where(
+            func.coalesce(accepted_counts.c.emp_count, 0) < 3,
+            or_(
+                User.state == employee.state,
+                User.district == employee.district
+            ),
+            ~Project.project_id.in_(
+                select(ProjectEmployee.project_id).where(
+                    ProjectEmployee.client_employee_id == employee.client_employee_id
+                )
+            )
+        )
+    )
+
+    results = db.exec(statement).all()
+    output = []
+    for proj, district, state, client_name, org_name in results:
+        output.append({
+            "id": proj.id,
+            "project_id": proj.project_id,
+            "quotation_reference_number": proj.quotation_reference_number,
+            "place": f"{district or ''}, {state or ''}".strip(", "),
+            "client_name": client_name or org_name or "Client",
+            "project_start_date": str(proj.project_start_date) if proj.project_start_date else None,
+            "project_status": proj.project_status
+        })
+    return output
+
+def accept_project_by_employee(
+    db: Session,
+    project_id: str,
+    employee_client_id: str,
+    visit_date: date,
+    visit_time: str,
+    notes: str = ""
+) -> ProjectEmployee:
+    # 1. Enforce max limit of 3 employees
+    count_stmt = select(func.count(ProjectEmployee.id)).where(
+        ProjectEmployee.project_id == project_id
+    )
+    if db.exec(count_stmt).one() >= 3:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot accept project: Maximum limit of 3 employees has already been reached."
+        )
+
+    # 2. Check for existing acceptance by this user
+    existing = db.exec(
+        select(ProjectEmployee).where(
+            ProjectEmployee.project_id == project_id,
+            ProjectEmployee.client_employee_id == employee_client_id
+        )
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You have already accepted this project."
+        )
+
+    now = datetime.utcnow()
+
+    # 3. Insert into project_employees
+    assignment = ProjectEmployee(
+        project_id=project_id,
+        client_employee_id=employee_client_id,
+        accepted_at=now,
+        created_at=now
+    )
+    db.add(assignment)
+
+    # 4. Insert into project_followups
+    followup_notes = f"Initial site visit scheduled at {visit_time}. {notes}".strip()
+    followup = ProjectFollowup(
+        project_id=project_id,
+        followup_date=visit_date,
+        notes=followup_notes,
+        next_followup_date=visit_date,
+        created_at=now
+    )
+    db.add(followup)
+
+    db.commit()
+    db.refresh(assignment)
+    return assignment

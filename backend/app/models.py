@@ -23,6 +23,7 @@ from sqlalchemy.orm import declarative_base
 from pydantic import field_validator
 from enum import Enum
 from sqlalchemy import JSON
+from sqlalchemy.dialects.mysql import LONGTEXT
 
 Base = declarative_base()
 
@@ -420,6 +421,7 @@ class ProjectEmployee(ProjectEmployeeBase, table=True):
         },
         back_populates="project_employees",
     )
+    user: Optional["User"] = Relationship(back_populates="assigned_projects")
 
     @property
     def employee_details(self) -> Optional["User"]:
@@ -738,6 +740,11 @@ class Project(ProjectBase, table=True):
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
 
+    commissions: List[ProjectCommission] = Relationship(
+        back_populates="project",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
+
     # Wrap foreign() around Bill.quotation_reference_number
     bills: List["Bill"] = Relationship(
         sa_relationship_kwargs={
@@ -754,6 +761,9 @@ class ProjectResponseWrapper(BaseModel):
 
 class ProjectCreate(ProjectBase):
     roundup: Optional[float] = None
+    commissions: Optional[List[ProjectCommissionInput]] = []
+    is_state: Optional[bool] = None
+    is_district: Optional[bool] = None
 
 class ProjectUpdate(SQLModel):
     project_id: Optional[str] = None
@@ -827,6 +837,36 @@ class ProjectStatusUpdate(SQLModel):
             )
         return value
 
+# -------------------------------------------------------------
+# Commission Schemas & Table Model
+# -------------------------------------------------------------
+class ProjectCommissionBase(SQLModel):
+    commission_name: str = Field(max_length=255)
+    commission_amount: Decimal = Field(default=Decimal("0.00"), max_digits=12, decimal_places=2)
+
+class ProjectCommissionInput(SQLModel):
+    commission_name: str
+    amount: Decimal
+
+class ProjectCommission(ProjectCommissionBase, table=True):
+    __tablename__ = "project_commission"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: Optional[int] = Field(
+        default=None, 
+        foreign_key="projects.id", 
+        nullable=False, 
+        index=True
+    )
+    created_at: Optional[datetime] = Field(
+        default_factory=get_datetime_utc, nullable=True
+    )
+    updated_at: Optional[datetime] = Field(
+        default_factory=get_datetime_utc, nullable=True
+    )
+
+    project: Optional["Project"] = Relationship(back_populates="commissions")
+    
 # ==========================================
 # EMPLOYEE DATA MODELS
 # ==========================================
@@ -1717,3 +1757,29 @@ class TodayFollowUpOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class Notification(SQLModel, table=True):
+    __tablename__ = "notifications"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: Optional[int] = Field(default=None, index=True)
+    type: str = Field(default="project", max_length=50)
+    title: str = Field(max_length=255)
+    message: str
+    payload: Optional[str] = Field(default=None, sa_column=Column(LONGTEXT))
+    priority: str = Field(default="medium")
+    channel: str = Field(default="in_app")
+    status: str = Field(default="sent")
+    read_at: Optional[datetime] = None
+    created_at: Optional[datetime] = Field(default_factory=get_datetime_utc, nullable=True)
+    updated_at: Optional[datetime] = Field(default_factory=get_datetime_utc, nullable=True)
+
+
+class AcceptProjectRequest(BaseModel):
+    project_id: str
+    visit_date: date
+    visit_time: str
+    notes: str = ""
+
+    
