@@ -1695,3 +1695,25 @@ class EmployeeProjectDetailsOut(BaseModel):
     project_start_date: Optional[date] = None
     project_end_date: Optional[date] = None
     quotation: Optional[QuotationOut] = None
+
+
+class DashboardSummaryOut(BaseModel):
+    totalEmployees: int
+    totalClients: int
+    quotationsAccepted: int
+    quotationsRejected: int
+
+
+class TodayFollowUpOut(BaseModel):
+    id: int
+    project_id: str
+    client_employee_id: Optional[str] = "-"
+    quotation_reference_number: Optional[str] = "-"
+    quotation_for: Optional[str] = "-"
+    followup_date: date
+    next_followup_date: Optional[date] = None
+    notes: str
+    project_status: Optional[str] = "Pending"
+
+    class Config:
+        from_attributes = True

@@ -350,7 +350,7 @@ def get_payments_by_project_id(
     )
 
     # 2. Print the compiled raw SQL query to your console/logs
-    print(str(query.statement.compile(compile_kwargs={"literal_binds": True})))
+    # print(str(query.statement.compile(compile_kwargs={"literal_binds": True})))
 
     # 3. Execute and return results
     return query.all()
@@ -2127,7 +2127,7 @@ def get_unified_ledger(db: Session, limit: int = 100) -> List[UnifiedTransaction
         transactions.append(
             UnifiedTransactionRead(
                 id=f"CP-{cp.id}",
-                date=cp.created_at,
+                date=cp.transaction_date,
                 title=f"Project Payment ({cp.project_id})",
                 reference_id=cp.transaction_id,
                 party_name=cp.project_id,
@@ -2278,3 +2278,76 @@ def get_employee_project_quotation_details(db: Session, client_employee_id: str)
         )
 
     return response_list
+
+
+def get_dashboard_summary_counts(db: Session):
+    # 1. Total Employees from users table (case-insensitive check)
+    total_employees = (
+        db.query(func.count(User.id))
+        .filter(
+            func.lower(User.role) == "employee",
+            User.is_active == 1
+        )
+        .scalar() or 0
+    )
+
+    # 2. Total Clients from users table (case-insensitive check)
+    total_clients = (
+        db.query(func.count(User.id))
+        .filter(
+            func.lower(User.role) == "client",
+            User.is_active == 1
+            )
+        .scalar() or 0
+    )
+
+    # 3. Accepted Quotations Count
+    quotations_accepted = (
+        db.query(func.count(Quotation.id))
+        .filter(func.lower(Quotation.quotation_status).in_(["accepted", "accept", "approved"]))
+        .scalar() or 0
+    )
+
+    # 4. Rejected Quotations Count
+    quotations_rejected = (
+        db.query(func.count(Quotation.id))
+        .filter(func.lower(Quotation.quotation_status).in_(["rejected", "reject", "declined"]))
+        .scalar() or 0
+    )
+
+    return {
+        "totalEmployees": total_employees,
+        "totalClients": total_clients,
+        "quotationsAccepted": quotations_accepted,
+        "quotationsRejected": quotations_rejected,
+    }
+
+
+def get_today_follow_ups(db: Session):
+    today = date.today()
+
+    # Matches follow-ups due today (either followup_date or next_followup_date)
+    records = (
+        db.query(ProjectFollowup, Project, Quotation)
+        .join(Project, ProjectFollowup.project_id == Project.project_id)
+        .outerjoin(Quotation, Project.quotation_reference_number == Quotation.quotation_reference_number)
+        .filter((ProjectFollowup.followup_date == today) | (ProjectFollowup.next_followup_date == today))
+        .order_by(ProjectFollowup.id.desc())
+        .all()
+    )
+
+    result = []
+    for followup, project, quotation in records:
+        result.append({
+            "id": followup.id,
+            "project_id": followup.project_id,
+            "client_employee_id": project.client_employee_id or "-",
+            "quotation_reference_number": project.quotation_reference_number or "-",
+            "quotation_for": quotation.quotation_for if quotation else "-",
+            "followup_date": followup.followup_date,
+            "next_followup_date": followup.next_followup_date,
+            "notes": followup.notes,
+            "project_status": project.project_status or "Pending",
+        })
+
+    return result

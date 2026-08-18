@@ -157,7 +157,9 @@ from app.models import (
     UnifiedTransactionRead,
     UnlockRequest,
     User,
-    EmployeeProjectDetailsOut
+    EmployeeProjectDetailsOut,
+    DashboardSummaryOut,
+    TodayFollowUpOut
 )
 import uuid
 import shutil
@@ -760,8 +762,6 @@ def change_user_password(
         email=payload.email,
         password=payload.current_password,
     )
-    print("Email",payload.email)
-    print("Password",payload.current_password)
 
     if not user:
         raise HTTPException(
@@ -3181,7 +3181,14 @@ def read_pipeline_health(db: SessionDep):
         "data": encrypted_payload,
     }
 
+@app.get("/dashboard/summary-counts", response_model=DashboardSummaryOut, tags=["Dashboard"])
+def get_summary_counts(db: SessionDep):
+    return crud.get_dashboard_summary_counts(db)
 
+
+@app.get("/dashboard/today-follow-ups", response_model=List[TodayFollowUpOut], tags=["Dashboard"])
+def get_today_followups(db: SessionDep):
+    return crud.get_today_follow_ups(db)
 
 @app.get(
     "/clients/{client_identifier:path}/financial-overview",
