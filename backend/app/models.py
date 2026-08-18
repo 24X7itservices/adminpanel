@@ -22,6 +22,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import declarative_base
 from pydantic import field_validator
 from enum import Enum
+from sqlalchemy import JSON
 
 Base = declarative_base()
 
@@ -52,6 +53,7 @@ class UserBase(SQLModel):
     district: Optional[str] = Field(default=None, max_length=255)
     state: Optional[str] = Field(default=None, max_length=255)
     gstin: Optional[str] = Field(default=None, max_length=255)
+    allowed_modules: List[str] = []
 
 class UserCreate(UserBase):
     password: str = Field(min_length=8, max_length=128)
@@ -90,6 +92,7 @@ class UserUpdate(SQLModel):
     organisation_name: Optional[str] = None
     gstin: Optional[str] = None
     profile_avatar: Optional[str] = None
+    allowed_modules: Optional[List[str]] = None
 
 class UserStatusUpdate(BaseModel):
     is_active: bool
@@ -121,6 +124,7 @@ class User(UserBase, table=True):
     role: str = Field(max_length=50)
     gstin: Optional[str] = Field(default=None, max_length=255)
     profile_avatar: Optional[str] = Field(default=None)
+    allowed_modules: List[str] = Field(default=[], sa_column=Column(JSON))
     created_at: Optional[datetime] = Field(
         default_factory=get_datetime_utc,
         sa_type=DateTime(timezone=True),
@@ -869,6 +873,10 @@ class EmployeeDataCreate(EmployeeDataBase):
 class FullEmployeeCreate(SQLModel):
     user_info: UserCreate
     employee_details: EmployeeDataCreate
+    allowed_modules: List[str] = []
+
+class EmployeeUpdatePermissions(SQLModel):
+    allowed_modules: List[str]
 
 # ==========================================
 # EMPLOYEE PAYMENT FULL DATA MODELS
@@ -931,6 +939,7 @@ class EmployeeFullDetailResponse(BaseModel):
     state: Optional[str] = None
     pincode: Optional[str] = None
 
+    allowed_modules: List[str] = []
     employee_data: Optional[EmployeeDataRead] = None
     managed_projects: List[ProjectRead] = []
     received_payments: List[EmployeePaymentRead] = []
@@ -1652,3 +1661,37 @@ class UnifiedTransactionRead(BaseModel):
 class UnlockRequest(BaseModel):
     identifier: str
     password: str
+
+# ============================================================
+# Employee Model Begin
+# ============================================================
+
+class ProductOut(BaseModel):
+    id: int
+    product_name: str
+    quantity: int
+    unit: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class QuotationOut(BaseModel):
+    quotation_reference_number: str
+    quotation_for: Optional[str] = None
+    quotation_status: str
+    quotation_date: Optional[date] = None
+    additional_offer: Optional[str] = None
+    products: List[ProductOut] = []
+
+    class Config:
+        from_attributes = True
+
+
+class EmployeeProjectDetailsOut(BaseModel):
+    client_employee_id: str
+    project_id: str
+    project_status: str
+    project_start_date: Optional[date] = None
+    project_end_date: Optional[date] = None
+    quotation: Optional[QuotationOut] = None

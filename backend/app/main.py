@@ -69,6 +69,7 @@ from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
 from fastapi import HTTPException, status as http_status
 from app.models import (
     UpdatePassword,
+    EmployeeUpdatePermissions,
     ProjectCreate,
     ProjectUpdate,
     ProjectPublic,
@@ -156,6 +157,7 @@ from app.models import (
     UnifiedTransactionRead,
     UnlockRequest,
     User,
+    EmployeeProjectDetailsOut
 )
 import uuid
 import shutil
@@ -215,7 +217,7 @@ class LoginPayload(BaseModel):
 # ==========================================
 
 
-@app.post("/api/admin/login", tags=["login"])
+@app.post("/login", tags=["login"])
 async def login_route(payload: dict, db: SessionDep):
     decrypted_data = security.decrypt_form_data(payload)
     if not decrypted_data:
@@ -231,15 +233,8 @@ async def login_route(payload: dict, db: SessionDep):
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    if user.role != "admin" and user.role != "superadmin":
-        raise HTTPException(
-            status_code=401, detail="Login allowed for admin users only."
-        )
-
-    # 1. Generate access token and refresh token
     token = security.generate_token(user_id=str(user.id), email=user.email)
 
-    # Use dedicated refresh token generator if available, or generate_token
     if hasattr(security, "generate_refresh_token"):
         refresh_token = security.generate_refresh_token(
             user_id=str(user.id), email=user.email
@@ -247,7 +242,6 @@ async def login_route(payload: dict, db: SessionDep):
     else:
         refresh_token = security.generate_token(user_id=str(user.id), email=user.email)
 
-    # 2. Record active session in DB (prevents 401 in process_token_refresh)
     crud.create_user_session(session=db, user_id=user.id, refresh_token=refresh_token)
 
     raw_user_data = {
@@ -255,18 +249,19 @@ async def login_route(payload: dict, db: SessionDep):
         "email": user.email,
         "name": getattr(user, "name", None),
         "role": user.role,
+        "client_employee_id": getattr(user, "client_employee_id", None),
         "profile_avatar": getattr(user, "profile_avatar", None),
+        "allowed_modules": getattr(user, "allowed_modules", []) or [],  # <-- Included here
     }
     encrypted_user_data = security.encrypt_form_data(raw_user_data)
     if not encrypted_user_data:
         raise HTTPException(status_code=500, detail="Outbound encryption failed")
 
-    # 3. Return both tokens back to Angular
     return {
         "status": 200,
         "message": "Login successful",
         "token": token,
-        "refresh_token": refresh_token,  # <-- Added key for Angular
+        "refresh_token": refresh_token,
         "data": encrypted_user_data,
     }
 
@@ -296,7 +291,9 @@ def save_uploaded_file(file: Optional[UploadFile], folder: str, path: str) -> Op
     return file_path.replace("\\", "/")
 
 
-@app.post("/api/admin/create_user", tags=["create-user"])
+import json
+
+@app.post("/create_user", tags=["create-user"])
 async def create_user_route(
     db: SessionDep,
     current_user: CurrentUser,
@@ -312,6 +309,7 @@ async def create_user_route(
     organisation_name: Optional[str] = Form("NA"),
     password: str = Form(...),
     gstin: Optional[str] = Form("NA"),
+    allowed_modules: Optional[str] = Form("[]"),  # <-- Accept JSON string from FormData
     # Employee-only Bank Details
     bankname: Optional[str] = Form(None),
     account_name: Optional[str] = Form(None),
@@ -324,10 +322,14 @@ async def create_user_route(
     profilePic: Optional[UploadFile] = File(None),
     designation: Optional[str] = Form(None),
 ):
+    # Parse permissions list safely
+    try:
+        parsed_modules = json.loads(allowed_modules) if allowed_modules else []
+    except Exception:
+        parsed_modules = []
 
     # 1. Check duplicate user
     existing_user = crud.get_user_by_email_and_role(session=db, email=email, role=role)
-
     if existing_user:
         raise HTTPException(
             status_code=400, detail=f"A {role} with this email already exists."
@@ -346,7 +348,6 @@ async def create_user_route(
 
     # 3. Handle Employee Creation
     if role == "employee":
-        # Save Binary Files safely
         aadhar_path = save_uploaded_file(aadhar_card, "aadhar", "uploads/employee")
         pan_path = save_uploaded_file(pan_card, "pan", "uploads/employee")
         dl_path = save_uploaded_file(dl, "dl", "uploads/employee")
@@ -357,7 +358,7 @@ async def create_user_route(
         dl_file_url = f"{settings.BASE_URL}/{dl_path}"
         profilePic_file_url = f"{settings.BASE_URL}/{profilePic}"
 
-        # Create Primary User
+        # Create Primary User with allowed_modules
         user_in = UserCreate(
             name=name,
             email=email,
@@ -373,6 +374,7 @@ async def create_user_route(
             terms_and_condition=True,
             profile_avatar=profilePic_file_url,
             gstin=gstin,
+            allowed_modules=parsed_modules,  # <-- Pass allowed_modules
         )
         new_user = crud.create_user(session=db, user_create=user_in)
 
@@ -392,7 +394,6 @@ async def create_user_route(
         try:
             crud.create_employee_full(db=db, data_in=data_in)
         except Exception as e:
-            # Rollback primary user if details insert fails
             db.delete(new_user)
             db.commit()
             raise HTTPException(
@@ -417,6 +418,7 @@ async def create_user_route(
             organisation_name=organisation_name,
             terms_and_condition=True,
             gstin=gstin,
+            allowed_modules=[],
         )
 
         try:
@@ -431,9 +433,38 @@ async def create_user_route(
 
     return {"status": 400, "message": "Invalid role specified"}
 
+@app.patch(
+    "/api/admin/employees/{client_employee_id}/permissions",
+    tags=["Employees"],
+    status_code=status.HTTP_200_OK,
+)
+def update_employee_permissions(
+    client_employee_id: str,
+    payload: EmployeeUpdatePermissions,
+    db: SessionDep,
+):
+    db_user = crud.get_user_by_client_employee_id(session=db, client_employee_id=client_employee_id)
+    if not db_user:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    # Update permissions
+    db_user.allowed_modules = payload.allowed_modules
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+
+    user_dict = jsonable_encoder(db_user)
+    user_dict.pop("password", None)
+
+    encrypted_data = security.encrypt_form_data(user_dict)
+    return {
+        "status": 200,
+        "message": "Permissions updated successfully",
+        "data": encrypted_data,
+    }
 
 @app.patch(
-    "/api/admin/update_user/{client_employee_id}/status",
+    "/update_user/{client_employee_id}/status",
     response_model=dict,
     tags=["user"],
 )
@@ -475,7 +506,7 @@ def update_employee_active_status(
     }
 
 
-@app.put("/api/admin/update_employee/{client_employee_id}", tags=["update-user"])
+@app.put("/update_employee/{client_employee_id}", tags=["update-user"])
 async def update_employee_route(
     client_employee_id: str,
     db: SessionDep,
@@ -490,19 +521,20 @@ async def update_employee_route(
     state: Optional[str] = Form(None),
     organisation_name: Optional[str] = Form(None),
     gstin: Optional[str] = Form(None),
+    allowed_modules: Optional[str] = Form(None),  # <-- 1. Accept JSON string from FormData
     # Optional Employee-only Bank Details
     bankname: Optional[str] = Form(None),
     account_name: Optional[str] = Form(None),
     ifsecode: Optional[str] = Form(None),
     account_number: Optional[str] = Form(None),
-    # Optional Employee-only Documents (Upload new file only if replacing)
+    # Optional Employee-only Documents
     aadhar_card: Optional[UploadFile] = File(None),
     pan_card: Optional[UploadFile] = File(None),
     dl: Optional[UploadFile] = File(None),
     profilePic: Optional[UploadFile] = File(None),
     designation: Optional[str] = Form(None),
 ):
-    # 1. Verify existing employee
+    # 2. Verify existing employee
     existing_user = crud.get_user_by_client_employee_id(
         session=db, client_employee_id=client_employee_id
     )
@@ -512,7 +544,7 @@ async def update_employee_route(
             detail=f"Employee with ID '{client_employee_id}' not found.",
         )
 
-    # 2. Check email uniqueness if email is being updated
+    # 3. Check email uniqueness if email is being updated
     if email and email != existing_user.email:
         duplicate_check = crud.get_user_by_email_and_role(
             session=db, email=email, role=existing_user.role
@@ -523,7 +555,15 @@ async def update_employee_route(
                 detail=f"Email '{email}' is already in use by another user.",
             )
 
-    # 3. Handle File Uploads (Only replace if new file uploaded)
+    # 4. Parse permissions JSON string
+    parsed_modules = None
+    if allowed_modules is not None:
+        try:
+            parsed_modules = json.loads(allowed_modules)
+        except Exception:
+            parsed_modules = []
+
+    # 5. Handle File Uploads (Only replace if a new file is uploaded)
     profile_pic_url = None
     if profilePic and profilePic.filename:
         pic_path = save_uploaded_file(profilePic, "profilePic", "uploads/employee")
@@ -544,7 +584,7 @@ async def update_employee_route(
         path = save_uploaded_file(dl, "dl", "uploads/employee")
         dl_file_url = f"{settings.BASE_URL}/{path}"
 
-    # 4. Construct update DTOs
+    # 6. Construct update DTOs
     user_update_data = UserUpdate(
         name=name,
         email=email,
@@ -556,6 +596,7 @@ async def update_employee_route(
         organisation_name=organisation_name,
         gstin=gstin,
         profile_avatar=profile_pic_url,
+        allowed_modules=parsed_modules,  # <-- Passed to UserUpdate
     )
 
     emp_update_data = EmployeeDataUpdate(
@@ -569,7 +610,7 @@ async def update_employee_route(
         designation=designation,
     )
 
-    # 5. Execute DB update
+    # 7. Execute DB update
     try:
         updated_result = crud.update_employee_full(
             db=db,
@@ -589,7 +630,7 @@ async def update_employee_route(
         )
 
 
-@app.get("/api/admin/getUsers", tags=["users"])
+@app.get("/getUsers", tags=["users"])
 async def get_users_route(
     db: SessionDep,
     # current_user: CurrentUser,
@@ -648,7 +689,7 @@ async def get_users_route(
 
 
 @app.get(
-    "/api/admin/usersbyid/{client_employee_id}",
+    "/usersbyid/{client_employee_id}",
     tags=["Users"],
     status_code=status.HTTP_200_OK,
 )
@@ -677,7 +718,7 @@ def read_user_by_employee_id(
 
 
 @app.patch(
-    "/api/admin/updateusersbyid/{client_employee_id}",
+    "/updateusersbyid/{client_employee_id}",
     tags=["Users"],
     status_code=status.HTTP_200_OK,
 )
@@ -704,7 +745,7 @@ def update_user_by_employee_id(
     }
 
 @app.patch(
-    "/api/admin/changepassword/{client_employee_id}",
+    "/changepassword/{client_employee_id}",
     tags=["Users"],
     status_code=status.HTTP_200_OK,
 )
@@ -762,7 +803,7 @@ def change_user_password(
 
 # 3. Upload Profile Image / Avatar
 @app.post(
-    "/api/admin/uploadavatar/{client_employee_id}",
+    "/uploadavatar/{client_employee_id}",
     tags=["Users"],
     status_code=status.HTTP_200_OK,
 )
@@ -807,7 +848,7 @@ class EncryptedFormEnvelope(BaseModel):
 # ==========================================
 
 
-@app.get("/api/admin/nextref", tags=["Quotations"])
+@app.get("/nextref", tags=["Quotations"])
 def preview_next_reference_number(db: SessionDep):
     """
     Endpoint for Angular to fetch the next preview reference number.
@@ -825,7 +866,7 @@ def preview_next_reference_number(db: SessionDep):
 
 
 @app.post(
-    "/api/admin/createquotations",
+    "/createquotations",
     tags=["quotations"],
     status_code=status.HTTP_201_CREATED,
 )
@@ -851,7 +892,7 @@ def create_quotation_route(
         )
 
 
-@app.get("/api/admin/quotations", tags=["quotations"])
+@app.get("/quotations", tags=["quotations"])
 def get_all_quotations_route(
     db: SessionDep,
     skip: int = Query(default=0, ge=0),
@@ -878,7 +919,7 @@ def get_all_quotations_route(
 
 
 @app.get(
-    "/api/admin/quotations/status/{status_name}",
+    "/quotations/status/{status_name}",
     response_model=dict,
     tags=["Quotations"],
     summary="Get quotations filtered by status",
@@ -908,7 +949,7 @@ def get_quotations_by_status_route(
     }
 
 
-@app.post("/api/admin/quotations/{ref_no:path}", tags=["quotations"])
+@app.post("/quotations/{ref_no:path}", tags=["quotations"])
 def get_quotation_by_ref_route(ref_no: str, db: SessionDep):
     # Unpack both quotation and explicitly loaded products list
     quotation, db_products = crud.get_quotation_by_ref_number(session=db, ref_no=ref_no)
@@ -977,7 +1018,7 @@ def get_quotation_by_ref_route(ref_no: str, db: SessionDep):
 
 
 @app.put(
-    "/api/admin/quotations_update/{ref_no:path}",
+    "/quotations_update/{ref_no:path}",
     tags=["quotations"],
     status_code=status.HTTP_201_CREATED,
 )
@@ -1059,7 +1100,7 @@ def update_quotation_status_route(
 
 
 @app.patch(
-    "/api/admin/quotations_status_update/{ref_no:path}",
+    "/quotations_status_update/{ref_no:path}",
     tags=["Quotations"],
     status_code=status.HTTP_200_OK,
     summary="Update only the status of a quotation",
@@ -1110,7 +1151,7 @@ def update_quotation_status_route(
         )
 
 
-@app.get("/api/admin/contact-form", tags=["contact-form"])
+@app.get("/contact-form", tags=["contact-form"])
 def get_all_contact_form(
     db: SessionDep,
     skip: int = Query(default=0, ge=0),
@@ -1135,7 +1176,7 @@ def get_all_contact_form(
     }
     return contactform
 
-@app.delete("/api/admin/contact-form/{form_id}", status_code=status.HTTP_200_OK,tags=["Contact Forms"],)
+@app.delete("/contact-form/{form_id}", status_code=status.HTTP_200_OK,tags=["Contact Forms"],)
 def delete_contact_form_endpoint(form_id: int, session: SessionDep):
     """Deletes a contact form by ID."""
     contact_form = crud.get_contact_form_by_id(session=session, form_id=form_id)
@@ -1153,7 +1194,7 @@ def delete_contact_form_endpoint(form_id: int, session: SessionDep):
     }
 
 @app.get(
-    "/api/admin/contact-forms/{form_id}",
+    "/contact-forms/{form_id}",
     response_model=ContactForm,
     status_code=status.HTTP_200_OK,
     tags=["Contact Forms"],
@@ -1174,7 +1215,7 @@ def read_contact_form_by_id(form_id: int, session: SessionDep):
 
     return contact_form
 
-@app.get("/api/admin/quotation-request", tags=["quotation-request"])
+@app.get("/quotation-request", tags=["quotation-request"])
 def get_all_quotations_request(
     db: SessionDep,
     skip: int = Query(default=0, ge=0),
@@ -1200,7 +1241,7 @@ def get_all_quotations_request(
     return contactform
 
 
-@app.get("/api/admin/quotation-request/{request_id}", tags=["quotation-request"])
+@app.get("/quotation-request/{request_id}", tags=["quotation-request"])
 def get_quotation_request_by_id_route(request_id: int, db: SessionDep):
     # 1. Fetch single quotation request from CRUD
     quotation_request = crud.get_quotation_request_by_id(
@@ -1233,7 +1274,7 @@ def get_quotation_request_by_id_route(request_id: int, db: SessionDep):
 
 
 @app.patch(
-    "/api/admin/quotationupdate/{quote_id}",
+    "/quotationupdate/{quote_id}",
     tags=["quotation-request"],
     status_code=status.HTTP_200_OK,
 )
@@ -1269,7 +1310,7 @@ PDF_STORAGE_DIR = "quotations"
 os.makedirs(PDF_STORAGE_DIR, exist_ok=True)
 
 
-@app.post("/api/admin/send-mail", tags=["quotations"])
+@app.post("/send-mail", tags=["quotations"])
 def send_quotation_mail(payload: QuotationEmailRequest):
     try:
         send_quotation_email(
@@ -1284,7 +1325,7 @@ def send_quotation_mail(payload: QuotationEmailRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/admin/sendLoginCredentials", tags=["quotations"])
+@app.post("/sendLoginCredentials", tags=["quotations"])
 def send_temporary_credentials_endpoint(payload: TempCredentialsEmailRequest):
     try:
         # Call the utility function using the alias
@@ -1651,7 +1692,7 @@ def build_quotation_pdf_file(
     doc.build(story)
 
 
-@app.post("/api/admin/generatewhatsapplink/{ref_no:path}", tags=["whatsapp"])
+@app.post("/generatewhatsapplink/{ref_no:path}", tags=["whatsapp"])
 def generate_whatsapp_quotation_pdf(ref_no: str, db: SessionDep):
     try:
         # 1. Fetch quotation and db_products from database
@@ -1759,7 +1800,7 @@ def generate_whatsapp_quotation_pdf(ref_no: str, db: SessionDep):
 
 
 @app.post(
-    "/api/admin/projects/",
+    "/projects/",
     response_model=ProjectResponseWrapper,
     status_code=status.HTTP_201_CREATED,
     tags=["project"],
@@ -1792,7 +1833,7 @@ async def create_project(
         )
 
 
-@app.get("/api/admin/projects/", response_model=List[ProjectPublic], tags=["project"])
+@app.get("/projects/", response_model=List[ProjectPublic], tags=["project"])
 def read_projects(
     db: SessionDep,
     skip: int = 0,
@@ -1802,7 +1843,7 @@ def read_projects(
 
 
 @app.get(
-    "/api/admin/projects/{project_db_id}",
+    "/projects/{project_db_id}",
     response_model=ProjectFullDetailsPublic,
     tags=["project"],
 )
@@ -1814,7 +1855,7 @@ def read_project(project_db_id: int, db: SessionDep):
 
 
 @app.patch(
-    "/api/admin/projects/{project_db_id}",
+    "/projects/{project_db_id}",
     response_model=ProjectPublic,
     tags=["project"],
 )
@@ -1832,7 +1873,7 @@ def update_project(
 
 
 @app.patch(
-    "/api/admin/projects/updatediscount/{project_id}",
+    "/projects/updatediscount/{project_id}",
     response_model=ProjectPublic,
     status_code=status.HTTP_200_OK,
     tags=["projects"],
@@ -1854,7 +1895,7 @@ def update_project_roundup(
 
 
 @app.delete(
-    "/api/admin/projects/{project_db_id}",
+    "/projects/{project_db_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     tags=["project"],
 )
@@ -1863,7 +1904,7 @@ def delete_project(project_db_id: int, db: SessionDep):
         raise HTTPException(status_code=404, detail="Project not found")
 
 
-# @app.post("/api/admin/projects-expenses/{project_id}",response_model=ProjectExpensePublic,tags=["project"])
+# @app.post("/projects-expenses/{project_id}",response_model=ProjectExpensePublic,tags=["project"])
 # def add_expense(
 #     project_id: str,
 #     expense: ProjectExpenseBase,
@@ -1875,7 +1916,7 @@ def delete_project(project_db_id: int, db: SessionDep):
 
 
 @app.post(
-    "/api/admin/projects-expenses",
+    "/projects-expenses",
     tags=["projects"],
     status_code=status.HTTP_201_CREATED,
 )
@@ -1936,7 +1977,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 @app.post(
-    "/api/admin/projects/add-document",
+    "/projects/add-document",
     response_model=ProjectDocumentPublic,
     status_code=status.HTTP_201_CREATED,
     tags=["project"],
@@ -1985,7 +2026,7 @@ async def add_project_document(
 
 
 @app.post(
-    "/api/admin/projects/add-followup",
+    "/projects/add-followup",
     response_model=ProjectFollowupPublic,
     tags=["project"],
 )
@@ -2003,7 +2044,7 @@ def add_project_followup(
 
 
 @app.patch(
-    "/api/admin/projects/{project_id}/status",
+    "/projects/{project_id}/status",
     response_model=ProjectPublic,
     status_code=status.HTTP_200_OK,
     tags=["project"],
@@ -2036,7 +2077,7 @@ ALLOWED_VIDEO_TYPES = {"video/mp4", "video/webm", "video/quicktime"}
 
 
 @app.post(
-    "/api/admin/projects-media", tags=["projects"], status_code=status.HTTP_201_CREATED
+    "/projects-media", tags=["projects"], status_code=status.HTTP_201_CREATED
 )
 async def upload_site_media(
     project_id: str = Form(...),
@@ -2082,7 +2123,7 @@ async def upload_site_media(
 
 
 @app.post(
-    "/api/admin/projects/add_employees",
+    "/projects/add_employees",
     tags=["projects"],
     status_code=status.HTTP_201_CREATED,
 )
@@ -2114,7 +2155,7 @@ def add_project_employee_route(
 
 
 @app.post(
-    "/api/admin/projects/{project_id}/images/",
+    "/projects/{project_id}/images/",
     response_model=ProjectImagePublic,
     tags=["project"],
 )
@@ -2127,7 +2168,7 @@ def add_image(
 
 
 @app.post(
-    "/api/admin/projects/{project_id}/documents/",
+    "/projects/{project_id}/documents/",
     response_model=ProjectDocumentPublic,
     tags=["project"],
 )
@@ -2144,7 +2185,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 
 @app.post(
-    "/api/admin/projects/add-payment",
+    "/projects/add-payment",
     status_code=status.HTTP_201_CREATED,
     tags=["project"],
 )
@@ -2205,7 +2246,7 @@ def add_payment(
 
 
 @app.post(
-    "/api/admin/projects/{project_id}/followups/",
+    "/projects/{project_id}/followups/",
     response_model=ProjectFollowupPublic,
     tags=["project"],
 )
@@ -2218,7 +2259,7 @@ def add_followup(
 
 
 @app.get(
-    "/api/admin/fulldetails/{project_id}",
+    "/fulldetails/{project_id}",
     response_model=ProjectFullDetailsPublic,
     tags=["project"],
 )
@@ -2229,7 +2270,7 @@ def read_project_full_details(project_id: str, db: SessionDep):
     return db_project
 
 
-@app.get("/api/admin/projects/", response_model=List[ProjectPublic], tags=["project"])
+@app.get("/projects/", response_model=List[ProjectPublic], tags=["project"])
 def read_all_projects(
     db: SessionDep,
     skip: int = 0,
@@ -2239,7 +2280,7 @@ def read_all_projects(
 
 
 @app.get(
-    "/api/admin/projects/full/",
+    "/projects/full/",
     response_model=List[ProjectFullDetailsPublic],
     tags=["project"],
 )
@@ -2257,7 +2298,7 @@ def read_all_projects_full(
 
 
 @app.get(
-    "/api/admin/employee/{client_employee_id}",
+    "/employee/{client_employee_id}",
     response_model=dict,
     tags=["Employee"],
     summary="Get employee details by client_employee_id",
@@ -2293,7 +2334,7 @@ def get_employee_by_id_route(
 
 
 @app.get(
-    "/api/admin/employees",
+    "/employees",
     response_model=dict,
     tags=["Employee"],
     summary="Get all employees with their details and assigned projects",
@@ -2330,7 +2371,7 @@ def get_all_employees_route(
 # ==========================================
 
 
-@app.get("/api/admin/nextbillref", tags=["Bills"])
+@app.get("/nextbillref", tags=["Bills"])
 def preview_next_reference_number(db: SessionDep):
     """
     Endpoint for Angular to fetch the next preview reference number.
@@ -2348,7 +2389,7 @@ def preview_next_reference_number(db: SessionDep):
 
 
 @app.post(
-    "/api/admin/bills",
+    "/bills",
     response_model=dict,
     tags=["Bills"],
     summary="Create a new bill with items",
@@ -2386,7 +2427,7 @@ def create_bill_route(
 
 
 @app.put(
-    "/api/admin/bills/{bill_id}",
+    "/bills/{bill_id}",
     response_model=dict,
     tags=["Bills"],
     summary="Update an existing bill with items",
@@ -2431,7 +2472,7 @@ def update_bill_route(
 
 
 @app.get(
-    "/api/admin/bills",
+    "/bills",
     response_model=dict,
     tags=["Bills"],
     summary="Get all bills with line items",
@@ -2468,7 +2509,7 @@ def get_all_bills_route(
 
 
 @app.patch(
-    "/api/admin/bills/{bill_reference_number:path}/status",
+    "/bills/{bill_reference_number:path}/status",
     response_model=BillRead,
     status_code=status.HTTP_200_OK,
     tags=["Bills"],
@@ -2498,7 +2539,7 @@ def update_bill_status_endpoint(
     return crud.update_bill_status(db, db_bill=db_bill, status_update=status_data)
 
 
-# @app.get("/api/admin/bills/{bill_refrence_number}",response_model=dict,tags=["Bills"],summary="Get single bill details by reference number",)
+# @app.get("/bills/{bill_refrence_number}",response_model=dict,tags=["Bills"],summary="Get single bill details by reference number",)
 # def get_single_bill_route(
 #     bill_refrence_number: str,
 #     session: SessionDep,
@@ -2532,7 +2573,7 @@ def update_bill_status_endpoint(
 
 
 @app.get(
-    "/api/admin/bills/{url_call}", response_model=BillFullResponse, tags=["project"]
+    "/bills/{url_call}", response_model=BillFullResponse, tags=["project"]
 )
 def get_bill_by_url_call(url_call: str, db: SessionDep):
     bill = crud.get_bill_by_url_call(db=db, url_call=url_call)
@@ -2546,7 +2587,7 @@ def get_bill_by_url_call(url_call: str, db: SessionDep):
 
 
 @app.get(
-    "/api/admin/projects/employee_payments/{client_employee_id}",
+    "/projects/employee_payments/{client_employee_id}",
     response_model=List[PaymentResponse],
     tags=["project"],
 )
@@ -2558,7 +2599,7 @@ def get_payments_by_employee(client_employee_id: str, db: SessionDep):
 
 
 @app.post(
-    "/api/admin/projects/employee_payments",
+    "/projects/employee_payments",
     response_model=PaymentResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["project"],
@@ -2571,7 +2612,7 @@ def add_payment(payment: PaymentCreate, db: SessionDep):
 
 
 @app.get(
-    "/api/admin/projects/employee_payments_project_id/{project_id}",
+    "/projects/employee_payments_project_id/{project_id}",
     response_model=List[PaymentResponse],
     tags=["project"],
 )
@@ -2581,7 +2622,7 @@ def get_payments_by_employee(project_id: str, db: SessionDep):
 
 
 @app.get(
-    "/api/admin/employees/{client_employee_id}/full-details",
+    "/employees/{client_employee_id}/full-details",
     response_model=dict,
     tags=["employee"],
 )
@@ -2596,6 +2637,11 @@ def read_employee_full_details(client_employee_id: str, db: SessionDep):
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Employee with client_employee_id '{client_employee_id}' not found.",
         )
+
+    if user.role != "admin" and user.role != "superadmin" and user.role != "employee":
+            raise HTTPException(
+                status_code=401, detail="Login allowed for admin users only."
+            )
 
     # 2. Map models into Pydantic schema instance
     response_dto = EmployeeFullDetailResponse(
@@ -2613,7 +2659,9 @@ def read_employee_full_details(client_employee_id: str, db: SessionDep):
         managed_projects=projects,
         received_payments=received_payments,
         profile_avatar=user.profile_avatar,
+        allowed_modules=getattr(user, "allowed_modules", []) or [],  # <-- Pass allowed_modules
     )
+
     # 3. Convert Pydantic instance to JSON-serializable dictionary
     json_safe_data = jsonable_encoder(response_dto)
 
@@ -2635,7 +2683,7 @@ def read_employee_full_details(client_employee_id: str, db: SessionDep):
 
 
 @app.get(
-    "/api/admin/jobs/generate-reference-id",
+    "/jobs/generate-reference-id",
     status_code=status.HTTP_200_OK,
     tags=["Jobs"],
 )
@@ -2653,7 +2701,7 @@ def get_next_job_reference_id(db: SessionDep):
 
 
 @app.post(
-    "/api/admin/jobs",
+    "/jobs",
     response_model=dict,
     status_code=status.HTTP_201_CREATED,
     tags=["Jobs"],
@@ -2676,7 +2724,7 @@ def create_new_job(job_in: JobCreate, db: SessionDep):
     }
 
 
-@app.patch("/api/admin/jobs/{job_id}", response_model=JobRead, tags=["Jobs"])
+@app.patch("/jobs/{job_id}", response_model=JobRead, tags=["Jobs"])
 def update_job_by_id(job_id: str, job_update: JobUpdate, db: SessionDep):
     normalized_job_id = (
         job_id.replace("_", "/") if ("_" in job_id and "/" not in job_id) else job_id
@@ -2693,7 +2741,7 @@ def update_job_by_id(job_id: str, job_update: JobUpdate, db: SessionDep):
     return updated_job
 
 
-@app.get("/api/admin/jobs", response_model=dict, tags=["Jobs"])
+@app.get("/jobs", response_model=dict, tags=["Jobs"])
 def read_all_jobs(
     db: SessionDep,
     skip: int = 0,
@@ -2717,7 +2765,7 @@ def read_all_jobs(
 
 
 @app.get(
-    "/api/admin/jobs/{job_id:path}",
+    "/jobs/{job_id:path}",
     response_model=JobRead,
     status_code=status.HTTP_200_OK,
     tags=["Jobs"],
@@ -2744,7 +2792,7 @@ def get_job_details(job_id: str, db: SessionDep):
 
 
 @app.get(
-    "/api/admin/job-requests",
+    "/job-requests",
     response_model=dict,
     tags=["Jobs"],
 )
@@ -2778,7 +2826,7 @@ def read_job_requests(
 
 # 2. GET: Fetch single job request by ID
 @app.get(
-    "/api/admin/job-requests/{request_id}",
+    "/job-requests/{request_id}",
     response_model=JobRequestResponse,
     tags=["Jobs"],
 )
@@ -2797,7 +2845,7 @@ def read_job_request(
 
 # 3. PATCH/PUT: Update request status
 @app.patch(
-    "/api/admin/job-requests/{request_id}/status",
+    "/job-requests/{request_id}/status",
     response_model=JobRequestResponse,
     tags=["Jobs"],
 )
@@ -2819,7 +2867,7 @@ def update_status(
 
 # 4. DELETE: Remove job request
 @app.delete(
-    "/api/admin/job-requests/{request_id}",
+    "/job-requests/{request_id}",
     status_code=status.HTTP_200_OK,
     tags=["Jobs"],
 )
@@ -2836,7 +2884,7 @@ def remove_job_request(
     return {"message": f"Job request {request_id} deleted successfully"}
 
 
-@app.post("/api/admin/auth/refresh-token", response_model=TokenResponse, tags=["Auth"])
+@app.post("/auth/refresh-token", response_model=TokenResponse, tags=["Auth"])
 def refresh_session_token(payload: TokenRefreshRequest, db: SessionDep):
     """Refreshes the access token and resets session expiration timer."""
     new_token_data = crud.process_token_refresh(db, payload.refresh_token)
@@ -2854,7 +2902,7 @@ def refresh_session_token(payload: TokenRefreshRequest, db: SessionDep):
 # ========================================================
 
 @app.get(
-    "/api/admin/trainings/generate-reference-id",
+    "/trainings/generate-reference-id",
     status_code=status.HTTP_200_OK,
     tags=["Trainings"],
 )
@@ -2866,7 +2914,7 @@ def get_next_training_reference_id(db: SessionDep):
         "training_id": next_ref_id,
     }
 
-@app.get("/api/admin/trainings", response_model=List[TrainingResponse], tags=["Trainings"])
+@app.get("/trainings", response_model=List[TrainingResponse], tags=["Trainings"])
 def read_all_trainings(
     db: SessionDep,
     skip: int = 0, 
@@ -2877,7 +2925,7 @@ def read_all_trainings(
     return crud.get_trainings(db, skip=skip, limit=limit, active_only=active_only)
 
 
-@app.get("/api/admin/trainings/{training_id_or_id}", response_model=TrainingResponse, tags=["Trainings"])
+@app.get("/trainings/{training_id_or_id}", response_model=TrainingResponse, tags=["Trainings"])
 def read_training(training_id_or_id: str, db: SessionDep):
     if training_id_or_id.isdigit():
         training = crud.get_training_by_id(db, id=int(training_id_or_id))
@@ -2888,7 +2936,7 @@ def read_training(training_id_or_id: str, db: SessionDep):
         raise HTTPException(status_code=404, detail="Training not found")
     return training
 
-@app.post("/api/admin/trainings", response_model=TrainingResponse, status_code=status.HTTP_201_CREATED, tags=["Trainings"])
+@app.post("/trainings", response_model=TrainingResponse, status_code=status.HTTP_201_CREATED, tags=["Trainings"])
 async def add_training(
     db: SessionDep,
     training_id: str = Form(...),
@@ -2940,7 +2988,7 @@ async def add_training(
     return crud.create_training(db, training_dto)
 
 
-@app.put("/api/admin/trainings/{id}", response_model=TrainingResponse, tags=["Trainings"])
+@app.put("/trainings/{id}", response_model=TrainingResponse, tags=["Trainings"])
 def modify_training(id: int, training_data: TrainingUpdate, db: SessionDep):
     updated = crud.update_training(db, id=id, training_data=training_data)
     if not updated:
@@ -2948,7 +2996,7 @@ def modify_training(id: int, training_data: TrainingUpdate, db: SessionDep):
     return updated
 
 
-@app.delete("/api/admin/trainings/{id}", status_code=status.HTTP_200_OK, tags=["Trainings"])
+@app.delete("/trainings/{id}", status_code=status.HTTP_200_OK, tags=["Trainings"])
 def remove_training(id: int, db: SessionDep):
     deleted = crud.delete_training(db, id=id)
     if not deleted:
@@ -2957,7 +3005,7 @@ def remove_training(id: int, db: SessionDep):
 
 
 
-@app.patch("/api/admin/trainings/{training_id}/status", response_model=TrainingResponse, tags=["Trainings"])
+@app.patch("/trainings/{training_id}/status", response_model=TrainingResponse, tags=["Trainings"])
 def update_training_status_endpoint(
     training_id: int,
     status_data: TrainingStatusUpdate,
@@ -2980,7 +3028,7 @@ def update_training_status_endpoint(
 # 2. TRAINING REQUESTS ENDPOINTS
 # ========================================================
 
-@app.get("/api/admin/training-requests", response_model=List[TrainingRequestResponse], tags=["Training Requests"])
+@app.get("/training-requests", response_model=List[TrainingRequestResponse], tags=["Training Requests"])
 def read_all_training_requests(
     db: SessionDep,
     skip: int = 0, 
@@ -2991,12 +3039,12 @@ def read_all_training_requests(
     return crud.get_training_requests(db, skip=skip, limit=limit, status=status)
 
 
-@app.post("/api/admin/training-requests", response_model=TrainingRequestResponse, status_code=status.HTTP_201_CREATED, tags=["Training Requests"])
+@app.post("/training-requests", response_model=TrainingRequestResponse, status_code=status.HTTP_201_CREATED, tags=["Training Requests"])
 def submit_training_request(request_data: TrainingRequestCreate, db: SessionDep):
     return crud.create_training_request(db, request_data)
 
 
-@app.patch("/api/admin/training-requests/{id}/status", response_model=TrainingRequestResponse, tags=["Training Requests"])
+@app.patch("/training-requests/{id}/status", response_model=TrainingRequestResponse, tags=["Training Requests"])
 def modify_training_request_status(
     id: int, 
     status_payload: TrainingRequestStatusUpdate, 
@@ -3008,7 +3056,7 @@ def modify_training_request_status(
     return updated
 
 
-@app.delete("/api/admin/training-requests/{id}", status_code=status.HTTP_200_OK, tags=["Training Requests"])
+@app.delete("/training-requests/{id}", status_code=status.HTTP_200_OK, tags=["Training Requests"])
 def remove_training_request(id: int, db: SessionDep):
     deleted = crud.delete_training_request(db, id=id)
     if not deleted:
@@ -3021,7 +3069,7 @@ def remove_training_request(id: int, db: SessionDep):
 # Dashboard API Endpoints
 # ============================================================
 
-@app.get("/api/admin/dashboard/kpis", response_model=dict, tags=["Dashboard"])
+@app.get("/dashboard/kpis", response_model=dict, tags=["Dashboard"])
 def read_kpis(db: SessionDep):
     kpisdata = crud.get_dashboard_kpis(db)
     json_safe_data = jsonable_encoder(kpisdata)
@@ -3040,7 +3088,7 @@ def read_kpis(db: SessionDep):
     }
 
 
-@app.get("/api/admin/analytics/financials", response_model=dict, tags=["Dashboard"])
+@app.get("/analytics/financials", response_model=dict, tags=["Dashboard"])
 def read_financial_chart(db: SessionDep):
     finances = crud.get_revenue_chart_data(db)
     json_safe_data = jsonable_encoder(finances)
@@ -3059,7 +3107,7 @@ def read_financial_chart(db: SessionDep):
     }
 
 
-@app.get("/api/admin/projects-watchlist", response_model=dict, tags=["Dashboard"])
+@app.get("/projects-watchlist", response_model=dict, tags=["Dashboard"])
 def read_active_projects(db: SessionDep):
         watchlist = crud.get_active_projects_watchlist(db)
         json_safe_data = jsonable_encoder(watchlist)
@@ -3078,7 +3126,7 @@ def read_active_projects(db: SessionDep):
         }
 
 
-@app.get("/api/admin/leads/priority", response_model=dict, tags=["Dashboard"])
+@app.get("/leads/priority", response_model=dict, tags=["Dashboard"])
 def read_priority_leads(db: SessionDep):
         priority = crud.get_priority_leads(db)
         json_safe_data = jsonable_encoder(priority)
@@ -3097,7 +3145,7 @@ def read_priority_leads(db: SessionDep):
         }
 
 
-@app.get("/api/admin/hr/overview", response_model=dict, tags=["Dashboard"])
+@app.get("/hr/overview", response_model=dict, tags=["Dashboard"])
 def read_hr_overview(db: SessionDep):
     overview = crud.get_hr_overview(db)
     json_safe_data = jsonable_encoder(overview)
@@ -3115,7 +3163,7 @@ def read_hr_overview(db: SessionDep):
         "data": encrypted_payload,
     }
 
-@app.get("/api/admin/analytics/pipeline-health", response_model=dict, tags=["Dashboard"])
+@app.get("/analytics/pipeline-health", response_model=dict, tags=["Dashboard"])
 def read_pipeline_health(db: SessionDep):
     pipelinehealth = crud.get_pipeline_health(db)
     json_safe_data = jsonable_encoder(pipelinehealth)
@@ -3136,7 +3184,7 @@ def read_pipeline_health(db: SessionDep):
 
 
 @app.get(
-    "/api/admin/clients/{client_identifier:path}/financial-overview",
+    "/clients/{client_identifier:path}/financial-overview",
     response_model=ClientFinancialOverview,
     status_code=status.HTTP_200_OK,
     tags=["Client Financials"],
@@ -3172,7 +3220,7 @@ def get_client_financial_overview(
     return overview
 
 
-@app.post("/api/admin/sendTrainingInvitationEmail", tags=["SendInvitation"])
+@app.post("/sendTrainingInvitationEmail", tags=["SendInvitation"])
 def send_training_invitation_endpoint(payload: TrainingInvitationEmailRequest):
     try:
         send_taining_email(
@@ -3189,7 +3237,7 @@ def send_training_invitation_endpoint(payload: TrainingInvitationEmailRequest):
 
 
 
-@app.get("/api/admin/stocks", response_model=dict, tags=["Stock"])
+@app.get("/stocks", response_model=dict, tags=["Stock"])
 def read_all_stocks( db: SessionDep, skip: int = 0, limit: int = 100,):
     all_stocks = crud.get_all_stocks(db, skip=skip, limit=limit)
     json_safe_data = jsonable_encoder(all_stocks)
@@ -3208,7 +3256,7 @@ def read_all_stocks( db: SessionDep, skip: int = 0, limit: int = 100,):
     }
 
 
-@app.post("/api/admin/stocks", response_model=StockResponse, status_code=status.HTTP_201_CREATED, tags=["Stock"])
+@app.post("/stocks", response_model=StockResponse, status_code=status.HTTP_201_CREATED, tags=["Stock"])
 def create_stock_with_file(
     db: SessionDep,
     product_name: str = Form(...),
@@ -3234,7 +3282,7 @@ def create_stock_with_file(
     return crud.create_stock(db, stock_data)
 
 
-@app.put("/api/admin/stocks/{stock_id}", response_model=StockResponse, tags=["Stock"])
+@app.put("/stocks/{stock_id}", response_model=StockResponse, tags=["Stock"])
 def update_stock_with_file(
     db: SessionDep,
     stock_id: int,
@@ -3267,7 +3315,7 @@ def update_stock_with_file(
     return updated
 
 
-@app.patch("/api/admin/stocks/{stock_id}/status", response_model=StockResponse, tags=["Stock"])
+@app.patch("/stocks/{stock_id}/status", response_model=StockResponse, tags=["Stock"])
 def change_stock_status(
     stock_id: int,
     status_payload: StockStatusUpdate,
@@ -3281,7 +3329,7 @@ def change_stock_status(
     return updated
 
 
-@app.delete("/api/admin/stocks/{stock_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Stock"])
+@app.delete("/stocks/{stock_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Stock"])
 def remove_stock(stock_id: int, db: SessionDep,):
     deleted = crud.delete_stock(db, stock_id)
     if not deleted:
@@ -3291,7 +3339,7 @@ def remove_stock(stock_id: int, db: SessionDep,):
     return None
 
 
-@app.get("/api/admin/assets", response_model=List[AssetResponse], tags=["Assets"])
+@app.get("/assets", response_model=List[AssetResponse], tags=["Assets"])
 def read_all_assets(
     db: SessionDep, skip: int = 0, limit: int = 100,
 ):
@@ -3299,7 +3347,7 @@ def read_all_assets(
 
 
 @app.post(
-    "/api/admin/assets",
+    "/assets",
     response_model=AssetResponse,
     status_code=status.HTTP_201_CREATED,
     tags=["Assets"]
@@ -3325,7 +3373,7 @@ def create_asset_with_file(
     return crud.create_asset(db, asset_data)
 
 
-@app.put("/api/admin/assets/{asset_id}", response_model=AssetResponse, tags=["Assets"])
+@app.put("/assets/{asset_id}", response_model=AssetResponse, tags=["Assets"])
 def update_asset_with_file(
     db: SessionDep,
     asset_id: int,
@@ -3353,7 +3401,7 @@ def update_asset_with_file(
     return updated
 
 
-@app.patch("/api/admin/assets/{asset_id}/status", response_model=AssetResponse, tags=["Assets"])
+@app.patch("/assets/{asset_id}/status", response_model=AssetResponse, tags=["Assets"])
 def change_asset_status(
     asset_id: int,
     status_payload: AssetStatusUpdate,
@@ -3367,7 +3415,7 @@ def change_asset_status(
     return updated
 
 
-@app.delete("/api/admin/assets/{asset_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Assets"])
+@app.delete("/assets/{asset_id}", status_code=status.HTTP_204_NO_CONTENT, tags=["Assets"])
 def remove_asset(asset_id: int, db: SessionDep,):
     deleted = crud.delete_asset(db, asset_id)
     if not deleted:
@@ -3377,38 +3425,38 @@ def remove_asset(asset_id: int, db: SessionDep,):
     return None
 
 
-@app.get("/api/admin/metrics", response_model=AccountsOverviewMetrics, tags=["Accounts"])
+@app.get("/metrics", response_model=AccountsOverviewMetrics, tags=["Accounts"])
 def read_accounts_metrics(db: SessionDep,):
     return crud.get_accounts_overview(db)
 
 
-@app.get("/api/admin/ledger", response_model=List[UnifiedTransactionRead], tags=["Accounts"])
+@app.get("/ledger", response_model=List[UnifiedTransactionRead], tags=["Accounts"])
 def read_ledger(db: SessionDep,limit: int = 50, ):
     return crud.get_unified_ledger(db, limit=limit)
 
 
-@app.get("/api/admin/banks", response_model=List[BankAccountRead], tags=["Accounts"])
+@app.get("/banks", response_model=List[BankAccountRead], tags=["Accounts"])
 def read_bank_accounts(db: SessionDep,):
     return crud.get_bank_accounts(db)
 
 
-@app.post("/api/admin/banks", response_model=BankAccountRead, tags=["Accounts"])
+@app.post("/banks", response_model=BankAccountRead, tags=["Accounts"])
 def create_bank(account: BankAccountCreate, db: SessionDep,):
     return crud.create_bank_account(db, account)
 
 
-@app.get("/api/admin/expenses/general", response_model=List[GeneralExpenseRead], tags=["Accounts"])
+@app.get("/expenses/general", response_model=List[GeneralExpenseRead], tags=["Accounts"])
 def read_general_expenses(db: SessionDep,):
     return crud.get_general_expenses(db)
 
 
-@app.post("/api/admin/expenses/general", response_model=GeneralExpenseRead, tags=["Accounts"])
+@app.post("/expenses/general", response_model=GeneralExpenseRead, tags=["Accounts"])
 def create_expense(
     expense: GeneralExpenseCreate, db: SessionDep,
 ):
     return crud.create_general_expense(db, expense)
 
-@app.post("/api/admin/unlock-screen", tags=["Auth"])
+@app.post("/unlock-screen", tags=["Auth"])
 def unlock_screen(payload: UnlockRequest, db: SessionDep):
     if not payload.identifier or not payload.password:
         raise HTTPException(
@@ -3428,7 +3476,7 @@ def unlock_screen(payload: UnlockRequest, db: SessionDep):
     return {"success": True, "message": "Screen unlocked successfully"}
 
 
-@app.get("/api/admin/user-info/{identifier}", tags=["Auth"])
+@app.get("/user-info/{identifier}", tags=["Auth"])
 def get_user_lock_info(identifier: str, db: SessionDep):
     # Lookup by id or email or client_employee_id
     query = select(User)
@@ -3449,3 +3497,21 @@ def get_user_lock_info(identifier: str, db: SessionDep):
         "profile_avatar": user.profile_avatar  # URL or base64 from users table
     }
 
+# ============================================================
+# Employee CRUD Begin
+# ============================================================
+
+@app.get(
+    "/employee-projects/{client_employee_id}",
+    response_model=List[EmployeeProjectDetailsOut],
+    tags=["Employee Project"]
+)
+def fetch_employee_projects(client_employee_id: str, db: SessionDep):
+    data = crud.get_employee_project_quotation_details(
+        db, client_employee_id=client_employee_id
+    )
+    if not data:
+        raise HTTPException(
+            status_code=404, detail="No projects found for the given employee ID"
+        )
+    return data

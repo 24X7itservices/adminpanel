@@ -1175,45 +1175,30 @@ def update_employee_full(
     client_employee_id: str,
     user_update: UserUpdate,
     employee_update: EmployeeDataUpdate,
-) -> Dict[str, Any]:
-    """
-    Updates records in both 'users' and 'employee_data' tables atomically.
-    Only provided non-None fields will be updated.
-    """
-    try:
-        # 1. Fetch existing records
-        user_db = get_user_by_client_employee_id(db, client_employee_id)
-        employee_data_db = get_employee_data_by_id(db, client_employee_id)
+):
+    user = get_user_by_client_employee_id(session=db, client_employee_id=client_employee_id)
+    if not user:
+        return None
 
-        if not user_db:
-            raise ValueError(f"User with ID {client_employee_id} not found.")
+    # Update User attributes
+    user_data = user_update.model_dump(exclude_unset=True)
+    for key, value in user_data.items():
+        if value is not None:
+            setattr(user, key, value)
 
-        # 2. Update User model fields selectively
-        user_data_dict = user_update.model_dump(exclude_unset=True)
-        for key, value in user_data_dict.items():
+    # Update Employee Data attributes
+    emp_data = get_employee_data_by_id(session=db, client_employee_id=client_employee_id)
+    if emp_data:
+        emp_dict = employee_update.model_dump(exclude_unset=True)
+        for key, value in emp_dict.items():
             if value is not None:
-                setattr(user_db, key, value)
-        db.add(user_db)
+                setattr(emp_data, key, value)
+        db.add(emp_data)
 
-        # 3. Update EmployeeData model fields selectively (if record exists)
-        if employee_data_db:
-            emp_data_dict = employee_update.model_dump(exclude_unset=True)
-            for key, value in emp_data_dict.items():
-                if value is not None:
-                    setattr(employee_data_db, key, value)
-            db.add(employee_data_db)
-
-        # 4. Commit atomic transaction
-        db.commit()
-        db.refresh(user_db)
-        if employee_data_db:
-            db.refresh(employee_data_db)
-
-        return {"user": user_db, "employee_data": employee_data_db}
-
-    except Exception as e:
-        db.rollback()
-        raise e
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
 
 
 def create_job(session: Session, job_in: JobCreate) -> JobData:
@@ -2237,3 +2222,59 @@ def verify_user_lock_password(
         db.refresh(db_user)
 
     return True
+
+# ============================================================
+# Employee CRUD Begin
+# ============================================================
+
+def get_employee_project_quotation_details(db: Session, client_employee_id: str):
+    results = (
+        db.query(ProjectEmployee, Project, Quotation)
+        .join(Project, ProjectEmployee.project_id == Project.project_id)
+        .join(
+            Quotation,
+            Project.quotation_reference_number == Quotation.quotation_reference_number,
+        )
+        .filter(ProjectEmployee.client_employee_id == client_employee_id)
+        .all()
+    )
+
+    response_list = []
+
+    for pe, project, quotation in results:
+        products = (
+            db.query(QuotationProduct)
+            .filter(
+                QuotationProduct.quotation_reference_number
+                == quotation.quotation_reference_number
+            )
+            .all()
+        )
+
+        response_list.append(
+            {
+                "client_employee_id": pe.client_employee_id,
+                "project_id": project.project_id,
+                "project_status": project.project_status,
+                "project_start_date": project.project_start_date,
+                "project_end_date": project.project_end_date,
+                "quotation": {
+                    "quotation_reference_number": quotation.quotation_reference_number,
+                    "quotation_for": quotation.quotation_for,
+                    "quotation_status": quotation.quotation_status,
+                    "quotation_date": quotation.quotation_date,
+                    "additional_offer": quotation.additional_offer,
+                    "products": [
+                        {
+                            "id": prod.id,
+                            "product_name": prod.product_name,
+                            "quantity": prod.quantity,
+                            "unit": prod.unit,
+                        }
+                        for prod in products
+                    ],
+                },
+            }
+        )
+
+    return response_list
