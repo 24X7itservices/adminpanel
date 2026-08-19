@@ -740,7 +740,7 @@ class Project(ProjectBase, table=True):
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
 
-    commissions: List[ProjectCommission] = Relationship(
+    commissions: List["ProjectCommission"] = Relationship(
         back_populates="project",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
@@ -761,7 +761,7 @@ class ProjectResponseWrapper(BaseModel):
 
 class ProjectCreate(ProjectBase):
     roundup: Optional[float] = None
-    commissions: Optional[List[ProjectCommissionInput]] = []
+    commissions: Optional[List["ProjectCommissionInput"]] = []
     is_state: Optional[bool] = None
     is_district: Optional[bool] = None
 
@@ -1162,6 +1162,29 @@ class BillRead(BillBase):
 
     model_config = ConfigDict(from_attributes=True)
 
+class BillTaxItemReport(BaseModel):
+    sl_no: int
+    invoice_number: str
+    invoice_date: str
+    client_name: Optional[str] = "N/A"
+    client_employee_id: Optional[str] = None
+    taxable_value: float
+    cgst: float
+    sgst: float
+    total_amount: float
+    status: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class BillTaxReportSummary(BaseModel):
+    total_taxable_value: float
+    total_cgst: float
+    total_sgst: float
+    grand_total: float
+    items: List[BillTaxItemReport] = []
+
+    model_config = ConfigDict(from_attributes=True)
 # ==========================================
 # PROJECT EMPLOYEE PAYMENT
 # ==========================================

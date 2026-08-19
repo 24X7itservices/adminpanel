@@ -10,6 +10,8 @@ from app.models import Quotation, QuotationProduct, QuotationCreateRequest
 from app.models import ContactForm, QuotationRequest, QuotationRequestPublic
 import json
 from app.models import (
+    BillTaxItemReport,
+    BillTaxReportSummary,
     UpdatePassword,
     Project,
     ProjectCreate,
@@ -2537,3 +2539,78 @@ def accept_project_by_employee(
     db.commit()
     db.refresh(assignment)
     return assignment
+
+
+def get_bills_tax_breakdown(
+    db: Session, client_employee_id: Optional[str] = None
+) -> BillTaxReportSummary:
+    query = select(Bill)
+    if client_employee_id:
+        query = query.where(Bill.client_employee_id == client_employee_id)
+
+    bills = db.exec(
+        query.order_by(Bill.created_at.desc())
+    ).all()  # type: ignore
+
+    items: List[BillTaxItemReport] = []
+    total_taxable = 0.0
+    total_cgst = 0.0
+    total_sgst = 0.0
+    grand_total = 0.0
+
+    for idx, bill in enumerate(bills, start=1):
+        # Fetch user name if client is linked
+        client_name = "N/A"
+        if bill.client_employee_id:
+            user = db.exec(
+                select(User).where(
+                    User.client_employee_id == bill.client_employee_id
+                )
+            ).first()
+            if user:
+                client_name = (
+                    user.name
+                    or getattr(user, "company_name", None)
+                    or bill.client_employee_id
+                )
+
+        bill_total = float(bill.total_amount or 0.0)
+
+        # Standard 18% GST reverse computation (Taxable = Total / 1.18, CGST = 9%, SGST = 9%)
+        taxable_value = round(bill_total / 1.18, 2) if bill_total > 0 else 0.0
+        cgst = round(taxable_value * 0.09, 2)
+        sgst = round(taxable_value * 0.09, 2)
+
+        total_taxable += taxable_value
+        total_cgst += cgst
+        total_sgst += sgst
+        grand_total += bill_total
+
+        inv_date = (
+            bill.created_at.strftime("%d-%b-%Y")
+            if bill.created_at
+            else "N/A"
+        )
+
+        items.append(
+            BillTaxItemReport(
+                sl_no=idx,
+                invoice_number=bill.bill_refrence_number,
+                invoice_date=inv_date,
+                client_name=client_name,
+                client_employee_id=bill.client_employee_id,
+                taxable_value=taxable_value,
+                cgst=cgst,
+                sgst=sgst,
+                total_amount=bill_total,
+                status=bill.status or "unpaid",
+            )
+        )
+
+    return BillTaxReportSummary(
+        total_taxable_value=round(total_taxable, 2),
+        total_cgst=round(total_cgst, 2),
+        total_sgst=round(total_sgst, 2),
+        grand_total=round(grand_total, 2),
+        items=items,
+    )

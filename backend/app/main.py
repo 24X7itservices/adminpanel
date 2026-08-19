@@ -69,6 +69,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
 from fastapi import HTTPException, status as http_status
 from app.models import (
+    BillTaxReportSummary,
     AcceptProjectRequest,
     Notification,
     UpdatePassword,
@@ -3609,3 +3610,10 @@ def accept_project(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to accept project: {str(e)}"
         )
+
+@app.get("/bills/tax-report", response_model=BillTaxReportSummary, tags=["Bills"])
+def get_bills_tax_report(
+    db: SessionDep,
+    client_employee_id: Optional[str] = Query(None, description="Optional filter by client ID")
+):
+    return crud.get_bills_tax_breakdown(db, client_employee_id=client_employee_id)
