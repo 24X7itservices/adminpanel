@@ -10,6 +10,7 @@ from app.models import Quotation, QuotationProduct, QuotationCreateRequest
 from app.models import ContactForm, QuotationRequest, QuotationRequestPublic
 import json
 from app.models import (
+    EmployeePayment,
     BillTaxItemReport,
     BillTaxReportSummary,
     UpdatePassword,
@@ -2303,6 +2304,71 @@ def verify_user_lock_password(
         db.refresh(db_user)
 
     return True
+
+def get_user_project_payment_summary(
+    db: Session, client_employee_id: str
+) -> List[Dict[str, Any]]:
+    # 1. Fetch assigned projects for the specific employee
+    statement = (
+        select(ProjectEmployee, Project)
+        .join(Project, ProjectEmployee.project_id == Project.project_id)
+        .where(ProjectEmployee.client_employee_id == client_employee_id)
+        .order_by(ProjectEmployee.created_at.desc())
+    )
+
+    results = db.exec(statement).all()
+    output_records = []
+
+    for proj_emp, project in results:
+        # 2. Total Commission from project_commission (using project.id int)
+        comm_total = db.exec(
+            select(
+                func.coalesce(func.sum(ProjectCommission.commission_amount), 0.0)
+            ).where(ProjectCommission.project_id == project.id)
+        ).one()
+
+        # 3. Employee payout status from employee_payments (using project_id str & client_employee_id)
+        emp_payment = db.exec(
+            select(EmployeePayment)
+            .where(
+                EmployeePayment.project_id == project.project_id,
+                EmployeePayment.client_employee_id == client_employee_id,
+            )
+            .order_by(EmployeePayment.created_at.desc())
+        ).first()
+
+        payment_status = emp_payment.payment_status if emp_payment else "Pending"
+
+        # 4. Customer payment status from bills table (via quotation_reference_number)
+        customer_payment_status = "unpaid"
+        if project.quotation_reference_number:
+            bill = db.exec(
+                select(Bill)
+                .where(
+                    Bill.quotation_reference_number
+                    == project.quotation_reference_number
+                )
+                .order_by(Bill.created_at.desc())
+            ).first()
+
+            if bill and bill.status:
+                customer_payment_status = bill.status
+
+        # 5. Build record with the 5 required fields
+        output_records.append(
+            {
+                "project_id": project.project_id or "N/A",
+                "project_name": project.quotation_reference_number
+                or project.project_id
+                or "Project",
+                "commission_amount": float(comm_total),
+                "project_status": project.project_status or "Pending",
+                "payment_status": payment_status,
+                "customer_payment_status": customer_payment_status,
+            }
+        )
+
+    return output_records
 
 # ============================================================
 # Employee CRUD Begin

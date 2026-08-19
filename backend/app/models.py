@@ -5,6 +5,7 @@ import uuid
 from pydantic import BaseModel, ConfigDict
 from pydantic import EmailStr
 from sqlmodel import Field, Relationship, SQLModel
+from sqlalchemy.dialects.mysql import ENUM
 from sqlalchemy import (
     DateTime,
     UniqueConstraint,
@@ -1248,6 +1249,38 @@ class PaymentResponse(PaymentCreate):
     created_at: Optional[datetime] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+class ProjectPaymentStatusResponse(BaseModel):
+    project_id: str
+    project_name: str
+    commission_amount: float
+    project_status: str
+    payment_status: str
+    customer_payment_status: str
+
+class EmployeePayment(SQLModel, table=True):
+    __tablename__ = "project_payments_employee"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    project_id: str = Field(max_length=255, nullable=False)
+    client_employee_id: Optional[str] = Field(default=None, max_length=255)
+    amount: Decimal = Field(
+        default=Decimal("0.00"), max_digits=10, decimal_places=2
+    )
+    payment_status: str = Field(
+        default="Pending",
+        sa_column=Column(
+            ENUM("Pending", "Completed", "Failed", "Refunded"),
+            default="Pending",
+            nullable=False,
+        ),
+    )
+    payment_date: Optional[datetime] = Field(default_factory=get_datetime_utc)
+    payment_source: Optional[str] = Field(default=None, max_length=100)
+    transaction_id: Optional[str] = Field(default=None, max_length=255)
+    created_at: Optional[datetime] = Field(
+        default_factory=get_datetime_utc, nullable=True
+    )
 
 # ==========================================
 # JOB POSTING

@@ -163,7 +163,8 @@ from app.models import (
     User,
     EmployeeProjectDetailsOut,
     DashboardSummaryOut,
-    TodayFollowUpOut
+    TodayFollowUpOut,
+    Project, ProjectCommission
 )
 import uuid
 import shutil
@@ -967,34 +968,49 @@ def get_quotations_by_status_route(
 
 @app.post("/quotations/{ref_no:path}", tags=["quotations"])
 def get_quotation_by_ref_route(ref_no: str, db: SessionDep):
-    # Unpack both quotation and explicitly loaded products list
+    # Unpack quotation and explicitly loaded products list
     quotation, db_products = crud.get_quotation_by_ref_number(session=db, ref_no=ref_no)
 
     if not quotation:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Quotation with url_call '{ref_no}' was not found.",
+            detail=f"Quotation with reference '{ref_no}' was not found.",
         )
 
-    # 1. Map products safely into clean dictionaries
+    # 1. Map products (without sensitive markup/pricing if desired)
     products_list = []
     for p in db_products:
         products_list.append(
             {
                 "id": getattr(p, "id", None),
-                "quotation_reference_number": getattr(
-                    p, "quotation_reference_number", ""
-                ),
+                "quotation_reference_number": getattr(p, "quotation_reference_number", ""),
                 "product_name": getattr(p, "product_name", ""),
                 "unit": getattr(p, "unit", ""),
                 "quantity": getattr(p, "quantity", 0),
-                "price": float(getattr(p, "price", 0.0) or 0.0),
-                "gst": float(getattr(p, "gst", 0.0) or 0.0),
-                "total": float(getattr(p, "total", 0.0) or 0.0),
             }
         )
 
-    # 2. Date formatting helper
+    # 2. Fetch Commissions associated with this quotation/project
+    commissions_list = []
+    quot_ref = getattr(quotation, "quotation_reference_number", ref_no)
+    db_project = db.exec(
+        select(Project).where(Project.quotation_reference_number == quot_ref)
+    ).first()
+
+    if db_project:
+        db_commissions = db.exec(
+            select(ProjectCommission).where(ProjectCommission.project_id == db_project.id)
+        ).all()
+        for c in db_commissions:
+            commissions_list.append(
+                {
+                    "id": c.id,
+                    "commission_name": c.commission_name,
+                    "commission_amount": float(c.commission_amount or 0.0),
+                }
+            )
+
+    # 3. Date formatting helper
     def format_date(val):
         if not val:
             return ""
@@ -1002,21 +1018,19 @@ def get_quotation_by_ref_route(ref_no: str, db: SessionDep):
             return val.isoformat()
         return str(val)
 
-    # 3. Construct response dictionary
+    # 4. Construct response dictionary
     raw_payload = {
         "id": getattr(quotation, "id", None),
-        "quotation_reference_number": getattr(
-            quotation, "quotation_reference_number", ""
-        ),
+        "quotation_reference_number": getattr(quotation, "quotation_reference_number", ""),
         "client_employee_id": getattr(quotation, "client_employee_id", None),
         "additional_offer": getattr(quotation, "additional_offer", None),
         "created_at": format_date(getattr(quotation, "created_at", None)),
-        "total_amount": float(getattr(quotation, "total_amount", 0.0) or 0.0),
         "quotation_date": format_date(getattr(quotation, "quotation_date", None)),
         "url_call": getattr(quotation, "url_call", ref_no),
         "quotation_for": getattr(quotation, "quotation_for", ref_no),
         "quotation_status": getattr(quotation, "quotation_status", ref_no),
         "products": products_list,
+        "commissions": commissions_list,
     }
 
     encrypted_data = security.encrypt_form_data(raw_payload)
@@ -3617,3 +3631,34 @@ def get_bills_tax_report(
     client_employee_id: Optional[str] = Query(None, description="Optional filter by client ID")
 ):
     return crud.get_bills_tax_breakdown(db, client_employee_id=client_employee_id)
+
+
+
+@app.get(
+    "/project-payment-status/{client_employee_id}",
+    tags=["Employee Dashboard"],
+    status_code=status.HTTP_200_OK,
+)
+def get_project_payment_status(client_employee_id: str, db: SessionDep):
+    try:
+        data = crud.get_user_project_payment_summary(
+            db=db, client_employee_id=client_employee_id
+        )
+
+        encrypted_data = security.encrypt_form_data(jsonable_encoder(data))
+        if not encrypted_data:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Encryption of response payload failed.",
+            )
+
+        return {
+            "status": 200,
+            "message": "Payment status summary fetched successfully.",
+            "data": encrypted_data,
+        }
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to fetch payment status: {str(e)}",
+        )
