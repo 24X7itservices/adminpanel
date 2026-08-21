@@ -69,6 +69,10 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
 from fastapi import HTTPException, status as http_status
 from app.models import (
+    ServiceRequest,
+    AssignEngineerRequest,
+    StatusUpdateRequest,
+    ViewTicketRequest,
     BillTaxReportSummary,
     AcceptProjectRequest,
     Notification,
@@ -164,7 +168,13 @@ from app.models import (
     EmployeeProjectDetailsOut,
     DashboardSummaryOut,
     TodayFollowUpOut,
-    Project, ProjectCommission
+    Project, 
+    ProjectCommission,
+    ReplyCreateRequest,
+    NoteCreateSchema,
+    StatusUpdateSchema,
+    AssignRequestSchema,
+    ViewServiceRequestSchema
 )
 import uuid
 import shutil
@@ -3662,3 +3672,241 @@ def get_project_payment_status(client_employee_id: str, db: SessionDep):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to fetch payment status: {str(e)}",
         )
+
+
+@app.get("/grievances",
+    tags=["Grievances"],
+    status_code=status.HTTP_200_OK)
+def list_grievances(user_id: str, user_role: str, db: SessionDep):
+    """
+    Returns tickets according to visibility permissions.
+    """
+    data = crud.get_visible_grievances(db, user_role=user_role, user_id=user_id)
+    return {"status": 200, "data": data}
+
+
+@app.post("/grievances/details",
+    tags=["Grievances"],
+    status_code=status.HTTP_200_OK)
+def get_grievance_details(payload: ViewTicketRequest, db: SessionDep):
+    grievance = crud.get_grievance_by_id(db, payload.grievance_id)
+    if not grievance:
+        raise HTTPException(status_code=404, detail="Grievance ticket not found")
+
+    if payload.user_role.lower() != "admin":
+        if not crud.check_employee_project_access(db, grievance, payload.user_id):
+            raise HTTPException(status_code=403, detail="Access denied. You do not own this project.")
+
+    details = crud.get_grievance_details_with_thread(db, payload.grievance_id)
+    return {"status": 200, "data": details}
+
+
+@app.post("/grievances/status",
+    tags=["Grievances"],
+    status_code=status.HTTP_200_OK)
+def update_status(payload: StatusUpdateRequest, db: SessionDep):
+    updated = crud.update_grievance_status(db, payload.grievance_id, payload.status, payload.resolution_remarks)
+    
+    # Notify Customer about status change
+    client_uid = crud.get_user_id_by_code(db, updated.client_employee_id)
+    if client_uid:
+        crud.insert_notification(
+            db,
+            user_id=client_uid,
+            n_type="grievance",
+            title=f"Ticket {updated.ticket_number} Updated",
+            message=f"Your ticket status has been changed to '{updated.status}'.",
+            payload={"ticket_id": updated.id, "ticket_number": updated.ticket_number, "status": updated.status},
+            priority=updated.priority.lower()
+        )
+    return {"status": 200, "message": f"Status updated to {updated.status}"}
+
+
+@app.post("/grievances/reply",
+    tags=["Grievances"],
+    status_code=status.HTTP_200_OK)
+def reply_grievance(payload: ReplyCreateRequest, db: SessionDep):
+    grievance = crud.get_grievance_by_id(db, payload.grievance_id)
+    reply = crud.create_grievance_reply(db, payload.grievance_id, payload.sender_id, payload.message, payload.is_internal_note)
+
+    if payload.user_role == "client":
+        # Client replied -> Notify Admins & Engineer
+        crud.notify_admin_and_assignee(
+            db,
+            n_type="grievance",
+            title=f"New Reply on Ticket {grievance.ticket_number}",
+            message=f"Client added a message: {payload.message[:80]}...",
+            payload={"ticket_id": grievance.id, "ticket_number": grievance.ticket_number},
+            engineer_code=grievance.assigned_engineer_id
+        )
+    else:
+        # Staff replied -> Notify Client (if not marked internal)
+        if not payload.is_internal_note:
+            client_uid = crud.get_user_id_by_code(db, grievance.client_employee_id)
+            if client_uid:
+                crud.insert_notification(
+                    db,
+                    user_id=client_uid,
+                    n_type="grievance",
+                    title=f"Support Response on {grievance.ticket_number}",
+                    message="Our support team has posted a reply to your complaint.",
+                    payload={"ticket_id": grievance.id, "ticket_number": grievance.ticket_number}
+                )
+    return {"status": 200, "message": "Reply posted and notification sent."}
+
+@app.get("/engineers", tags=["Engineers"], status_code=status.HTTP_200_OK)
+def list_engineers(db: SessionDep):
+    """
+    Returns list of engineers/employees for ticket assignment dropdowns.
+    """
+    data = crud.get_all_engineers(db)
+    return {"status": 200, "data": data}
+
+
+@app.post("/grievances/assign",tags=["Grievances"],)
+def assign_engineer(payload: AssignEngineerRequest, db: SessionDep):
+    updated = crud.assign_engineer_to_grievance(db, payload.grievance_id, payload.assigned_engineer_id)
+
+    # Notify Assigned Engineer
+    if payload.assigned_engineer_id:
+        eng_uid = crud.get_user_id_by_code(db, payload.assigned_engineer_id)
+        if eng_uid:
+            crud.insert_notification(
+                db,
+                user_id=eng_uid,
+                n_type="grievance",
+                title=f"Assigned to Ticket {updated.ticket_number}",
+                message=f"You have been assigned as lead engineer for ticket: '{updated.subject}'.",
+                payload={"ticket_id": updated.id, "ticket_number": updated.ticket_number},
+                priority=updated.priority.lower()
+            )
+    return {"status": 200, "message": "Engineer assigned and notified."}
+
+
+
+@app.get("/service-requests", tags=["Service Requests"], status_code=status.HTTP_200_OK)
+def list_service_requests(user_id: str, user_role: str, db: SessionDep):
+    data = crud.get_visible_service_requests(db, user_role=user_role, user_id=user_id)
+    return {"status": 200, "data": data}
+
+
+@app.post("/service-requests/details", tags=["Service Requests"], status_code=status.HTTP_200_OK)
+def view_service_request_details(payload: ViewServiceRequestSchema, db: SessionDep):
+    data = crud.get_service_request_details(db, payload.request_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Service request not found")
+    return {"status": 200, "data": data}
+
+
+@app.post("/service-requests/assign", tags=["Service Requests"])
+def assign_service_request_engineer(payload: AssignRequestSchema, db: SessionDep):
+    if payload.admin_role.lower() != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can assign service engineers.")
+
+    updated = crud.assign_engineer_to_request(db, payload.request_id, payload.assigned_engineer_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Service request not found")
+
+    # Notify Assigned Engineer
+    if payload.assigned_engineer_id:
+        eng_uid = crud.get_user_id_by_code(db, payload.assigned_engineer_id)
+        if eng_uid:
+            crud.insert_notification(
+                db,
+                user_id=eng_uid,
+                n_type="service_request",
+                title=f"Assigned to Service Request {updated.request_number}",
+                message=f"You are assigned to service order: '{updated.service_title}' ({updated.service_category}).",
+                payload={
+                    "request_id": updated.id,
+                    "request_number": updated.request_number,
+                    "url": "/admin/service-requests"
+                },
+                priority=updated.priority.lower()
+            )
+
+    return {"status": 200, "message": "Engineer assigned and notified."}
+
+
+@app.post("/service-requests/status", tags=["Service Requests"])
+def update_service_request_status(payload: StatusUpdateSchema, db: SessionDep):
+    updated = crud.update_service_request_status(
+        db,
+        request_id=payload.request_id,
+        status=payload.status,
+        admin_remarks=payload.admin_remarks,
+        quotation_reference_number=payload.quotation_reference_number
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Service request not found")
+
+    # Notify Customer about status change / quotation availability
+    client_uid = crud.get_user_id_by_code(db, updated.client_employee_id)
+    if client_uid:
+        extra_msg = f" (Quotation: {updated.quotation_reference_number})" if updated.quotation_reference_number else ""
+        crud.insert_notification(
+            db,
+            user_id=client_uid,
+            n_type="service_request",
+            title=f"Request {updated.request_number} Updated",
+            message=f"Your service request status is now '{updated.status}'{extra_msg}.",
+            payload={
+                "request_id": updated.id,
+                "request_number": updated.request_number,
+                "status": updated.status,
+                "quotation_ref": updated.quotation_reference_number,
+                "url": "/service-requests"
+            },
+            priority=updated.priority.lower()
+        )
+
+    return {"status": 200, "message": f"Status updated to {updated.status}"}
+
+
+@app.post("/service-requests/notes", tags=["Service Requests"])
+def add_service_request_note(payload: NoteCreateSchema, db: SessionDep):
+    sr = db.query(ServiceRequest).filter(ServiceRequest.id == payload.request_id).first()
+    if not sr:
+        raise HTTPException(status_code=404, detail="Service request not found")
+
+    note = crud.add_service_request_note(
+        db,
+        request_id=payload.request_id,
+        sender_id=payload.sender_id,
+        message=payload.message,
+        is_internal_note=payload.is_internal_note
+    )
+
+    if payload.user_role == "client":
+        # Client added note -> Notify Admins & Assigned Engineer
+        crud.notify_admin_and_assignee(
+            db,
+            n_type="service_request",
+            title=f"New Note on Request {sr.request_number}",
+            message=f"Client update: {payload.message[:80]}...",
+            payload={
+                "request_id": sr.id,
+                "request_number": sr.request_number,
+                "url": "/admin/service-requests"
+            },
+            engineer_code=sr.assigned_engineer_id
+        )
+    else:
+        # Staff replied -> Notify Client (if not an internal note)
+        if not payload.is_internal_note:
+            client_uid = crud.get_user_id_by_code(db, sr.client_employee_id)
+            if client_uid:
+                crud.insert_notification(
+                    db,
+                    user_id=client_uid,
+                    n_type="service_request",
+                    title=f"Service Team Note: {sr.request_number}",
+                    message="Our service team has posted an update to your request.",
+                    payload={
+                        "request_id": sr.id,
+                        "request_number": sr.request_number,
+                        "url": "/service-requests"
+                    }
+                )
+
+    return {"status": 200, "message": "Note added and notification dispatched.", "note_id": note.id}

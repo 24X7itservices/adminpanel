@@ -8,6 +8,8 @@ from app.core.security import SecurityService
 from app.models import User, UserCreate, UserUpdate
 from app.models import Quotation, QuotationProduct, QuotationCreateRequest
 from app.models import ContactForm, QuotationRequest, QuotationRequestPublic
+from sqlalchemy import or_, desc
+from sqlalchemy import text
 import json
 from app.models import (
     EmployeePayment,
@@ -81,11 +83,17 @@ from app.models import (
     PaymentStatus,
     ProjectCommission,
     Notification,
+    Grievance, 
+    GrievanceReply, 
+    GrievanceAttachment,
+    User,
+    ServiceRequest, 
+    ServiceRequestNote, 
+    ServiceRequestAttachment,
 )
 from datetime import date
 from decimal import Decimal
 from sqlmodel import Session, select, or_
-from sqlalchemy.orm import selectinload
 from app.models import Project, ProjectEmployee
 from fastapi import HTTPException, status
 from app.models import User, QuotationRequest
@@ -2680,3 +2688,450 @@ def get_bills_tax_breakdown(
         grand_total=round(grand_total, 2),
         items=items,
     )
+
+
+# ============================================================
+# Grievance CRUD Begin
+# ============================================================
+
+def get_visible_grievances(db: Session, user_role: str, user_id: str) -> List[dict]:
+    """
+    Admin: sees all tickets.
+    Employee: sees tickets assigned directly or belonging to projects they are assigned to.
+    """
+    query = (
+        db.query(
+            Grievance,
+            User.name.label("client_name"),
+            User.phone.label("client_phone"),
+            User.email.label("client_email")
+        )
+        .outerjoin(User, User.client_employee_id == Grievance.client_employee_id)
+    )
+
+    if user_role.lower() != "admin":
+        assigned_project_ids = [
+            row[0] for row in db.query(ProjectEmployee.project_id)
+            .filter(ProjectEmployee.client_employee_id == user_id)
+            .all()
+        ]
+        query = query.filter(
+            or_(
+                Grievance.assigned_engineer_id == user_id,
+                Grievance.project_id.in_(assigned_project_ids)
+            )
+        )
+
+    results = query.order_by(desc(Grievance.id)).all()
+
+    output = []
+    for g, c_name, c_phone, c_email in results:
+        output.append({
+            "id": g.id,
+            "ticket_number": g.ticket_number,
+            "client_employee_id": g.client_employee_id,
+            "client_name": c_name or "Client",
+            "client_phone": c_phone,
+            "client_email": c_email,
+            "project_id": g.project_id,
+            "assigned_engineer_id": g.assigned_engineer_id,
+            "category": g.category,
+            "subject": g.subject,
+            "description": g.description,
+            "priority": g.priority,
+            "status": g.status,
+            "created_at": g.created_at.strftime("%Y-%m-%d %H:%M:%S") if g.created_at else None,
+            "resolved_at": g.resolved_at.strftime("%Y-%m-%d %H:%M:%S") if g.resolved_at else None,
+        })
+    return output
+
+def get_grievance_by_id(db: Session, grievance_id: int) -> Optional[Grievance]:
+    return db.query(Grievance).filter(Grievance.id == grievance_id).first()
+
+def check_employee_project_access(db: Session, grievance: Grievance, employee_id: str) -> bool:
+    if grievance.assigned_engineer_id == employee_id:
+        return True
+    if grievance.project_id:
+        is_assigned = db.query(ProjectEmployee).filter(
+            ProjectEmployee.project_id == grievance.project_id,
+            ProjectEmployee.client_employee_id == employee_id
+        ).first()
+        return bool(is_assigned)
+    return False
+
+def get_grievance_details_with_thread(db: Session, grievance_id: int) -> dict:
+    grievance = get_grievance_by_id(db, grievance_id)
+    if not grievance:
+        return None
+
+    client_user = db.query(User).filter(User.client_employee_id == grievance.client_employee_id).first()
+    engineer_user = db.query(User).filter(User.client_employee_id == grievance.assigned_engineer_id).first()
+
+    attachments = db.query(GrievanceAttachment).filter(GrievanceAttachment.grievance_id == grievance_id).all()
+    
+    replies_query = (
+        db.query(
+            GrievanceReply,
+            User.name.label("sender_name"),
+            User.role.label("sender_role"),
+            User.profile_avatar.label("sender_avatar")
+        )
+        .outerjoin(User, User.client_employee_id == GrievanceReply.sender_id)
+        .filter(GrievanceReply.grievance_id == grievance_id)
+        .order_by(GrievanceReply.created_at.asc())
+        .all()
+    )
+
+    replies = []
+    for r, s_name, s_role, s_avatar in replies_query:
+        replies.append({
+            "id": r.id,
+            "sender_id": r.sender_id,
+            "sender_name": s_name or r.sender_id,
+            "sender_role": s_role or "Staff",
+            "sender_avatar": s_avatar,
+            "message": r.message,
+            "is_internal_note": r.is_internal_note,
+            "created_at": r.created_at.strftime("%Y-%m-%d %H:%M:%S") if r.created_at else None
+        })
+
+    return {
+        "details": {
+            "id": grievance.id,
+            "ticket_number": grievance.ticket_number,
+            "client_employee_id": grievance.client_employee_id,
+            "client_name": client_user.name if client_user else "Client",
+            "client_phone": client_user.phone if client_user else None,
+            "client_email": client_user.email if client_user else None,
+            "project_id": grievance.project_id,
+            "assigned_engineer_id": grievance.assigned_engineer_id,
+            "engineer_name": engineer_user.name if engineer_user else "Unassigned",
+            "category": grievance.category,
+            "subject": grievance.subject,
+            "description": grievance.description,
+            "priority": grievance.priority,
+            "status": grievance.status,
+            "resolution_remarks": grievance.resolution_remarks,
+            "created_at": grievance.created_at.strftime("%Y-%m-%d %H:%M:%S") if grievance.created_at else None,
+            "resolved_at": grievance.resolved_at.strftime("%Y-%m-%d %H:%M:%S") if grievance.resolved_at else None,
+            "closed_at": grievance.closed_at.strftime("%Y-%m-%d %H:%M:%S") if grievance.closed_at else None,
+        },
+        "attachments": [
+            {
+                "id": att.id,
+                "file_name": att.file_name,
+                "file_path": att.file_path,
+                "file_type": att.file_type,
+                "uploaded_by": att.uploaded_by
+            } for att in attachments
+        ],
+        "replies": replies
+    }
+
+def update_grievance_status(
+    db: Session, 
+    grievance_id: int, 
+    status: str, 
+    resolution_remarks: Optional[str] = None
+) -> Optional[Grievance]:
+    grievance = get_grievance_by_id(db, grievance_id)
+    if not grievance:
+        return None
+
+    grievance.status = status
+    if resolution_remarks:
+        grievance.resolution_remarks = resolution_remarks
+
+    now = datetime.utcnow()
+    if status == "Resolved":
+        grievance.resolved_at = now
+    elif status == "Closed":
+        grievance.closed_at = now
+    elif status in ["Open", "In Progress"]:
+        grievance.resolved_at = None
+        grievance.closed_at = None
+
+    db.commit()
+    db.refresh(grievance)
+    return grievance
+
+def create_grievance_reply(
+    db: Session, 
+    grievance_id: int, 
+    sender_id: str, 
+    message: str, 
+    is_internal_note: bool = False
+) -> GrievanceReply:
+    reply = GrievanceReply(
+        grievance_id=grievance_id,
+        sender_id=sender_id,
+        message=message,
+        is_internal_note=is_internal_note
+    )
+    db.add(reply)
+    db.commit()
+    db.refresh(reply)
+    return reply
+
+def get_all_engineers(db: Session) -> List[dict]:
+    """
+    Fetch all users with the employee or engineer role for the assignment dropdown.
+    """
+    engineers = db.query(User).filter(User.role.in_(["employee", "engineer", "staff"])).all()
+    return [
+        {
+            "engineer_id": eng.client_employee_id,
+            "name": eng.name,
+            "email": eng.email,
+            "phone": eng.phone,
+            "avatar": eng.profile_avatar
+        }
+        for eng in engineers
+    ]
+
+def assign_engineer_to_grievance(
+    db: Session, 
+    grievance_id: int, 
+    assigned_engineer_id: Optional[str]
+) -> Optional[Grievance]:
+    """
+    Update the assigned engineer for a ticket.
+    """
+    grievance = db.query(Grievance).filter(Grievance.id == grievance_id).first()
+    if not grievance:
+        return None
+
+    grievance.assigned_engineer_id = assigned_engineer_id if assigned_engineer_id else None
+    
+    # If the ticket is currently 'Open' and being assigned, transition status to 'In Progress'
+    if grievance.assigned_engineer_id and grievance.status == "Open":
+        grievance.status = "In Progress"
+
+    db.commit()
+    db.refresh(grievance)
+    return grievance
+
+# ============================================================
+# Service Request CRUD Begin
+# ============================================================
+
+def get_visible_service_requests(db: Session, user_role: str, user_id: str) -> List[dict]:
+    query = (
+        db.query(
+            ServiceRequest,
+            User.name.label("client_name"),
+            User.phone.label("client_phone"),
+            User.email.label("client_email")
+        )
+        .outerjoin(User, User.client_employee_id == ServiceRequest.client_employee_id)
+    )
+
+    if user_role.lower() != "admin":
+        assigned_project_ids = [
+            row[0] for row in db.query(ProjectEmployee.project_id)
+            .filter(ProjectEmployee.client_employee_id == user_id)
+            .all()
+        ]
+        query = query.filter(
+            or_(
+                ServiceRequest.assigned_engineer_id == user_id,
+                ServiceRequest.project_id.in_(assigned_project_ids)
+            )
+        )
+
+    results = query.order_by(desc(ServiceRequest.id)).all()
+
+    output = []
+    for sr, c_name, c_phone, c_email in results:
+        output.append({
+            "id": sr.id,
+            "request_number": sr.request_number,
+            "client_employee_id": sr.client_employee_id,
+            "client_name": c_name or "Client",
+            "client_phone": c_phone,
+            "client_email": c_email,
+            "project_id": sr.project_id,
+            "assigned_engineer_id": sr.assigned_engineer_id,
+            "service_category": sr.service_category,
+            "service_title": sr.service_title,
+            "service_description": sr.service_description,
+            "priority": sr.priority,
+            "preferred_date": sr.preferred_date.strftime("%Y-%m-%d") if sr.preferred_date else None,
+            "preferred_time_slot": sr.preferred_time_slot,
+            "service_location": sr.service_location,
+            "status": sr.status,
+            "quotation_reference_number": sr.quotation_reference_number,
+            "created_at": sr.created_at.strftime("%Y-%m-%d %H:%M:%S") if sr.created_at else None
+        })
+    return output
+
+
+def get_service_request_details(db: Session, request_id: int) -> Optional[dict]:
+    sr = db.query(ServiceRequest).filter(ServiceRequest.id == request_id).first()
+    if not sr:
+        return None
+
+    client_user = db.query(User).filter(User.client_employee_id == sr.client_employee_id).first()
+    engineer_user = db.query(User).filter(User.client_employee_id == sr.assigned_engineer_id).first()
+    attachments = db.query(ServiceRequestAttachment).filter(ServiceRequestAttachment.request_id == request_id).all()
+
+    notes_query = (
+        db.query(
+            ServiceRequestNote,
+            User.name.label("sender_name"),
+            User.role.label("sender_role")
+        )
+        .outerjoin(User, User.client_employee_id == ServiceRequestNote.sender_id)
+        .filter(ServiceRequestNote.request_id == request_id)
+        .order_by(ServiceRequestNote.created_at.asc())
+        .all()
+    )
+
+    notes = []
+    for n, s_name, s_role in notes_query:
+        notes.append({
+            "id": n.id,
+            "sender_id": n.sender_id,
+            "sender_name": s_name or n.sender_id,
+            "sender_role": s_role or "Staff",
+            "message": n.message,
+            "is_internal_note": n.is_internal_note,
+            "created_at": n.created_at.strftime("%Y-%m-%d %H:%M:%S") if n.created_at else None
+        })
+
+    return {
+        "details": {
+            "id": sr.id,
+            "request_number": sr.request_number,
+            "client_employee_id": sr.client_employee_id,
+            "client_name": client_user.name if client_user else "Client",
+            "client_phone": client_user.phone if client_user else None,
+            "client_email": client_user.email if client_user else None,
+            "project_id": sr.project_id,
+            "assigned_engineer_id": sr.assigned_engineer_id,
+            "engineer_name": engineer_user.name if engineer_user else "Unassigned",
+            "service_category": sr.service_category,
+            "service_title": sr.service_title,
+            "service_description": sr.service_description,
+            "priority": sr.priority,
+            "preferred_date": sr.preferred_date.strftime("%Y-%m-%d") if sr.preferred_date else None,
+            "preferred_time_slot": sr.preferred_time_slot,
+            "service_location": sr.service_location,
+            "status": sr.status,
+            "quotation_reference_number": sr.quotation_reference_number,
+            "admin_remarks": sr.admin_remarks,
+            "created_at": sr.created_at.strftime("%Y-%m-%d %H:%M:%S") if sr.created_at else None,
+        },
+        "attachments": [
+            {
+                "id": att.id,
+                "file_name": att.file_name,
+                "file_path": att.file_path,
+                "file_type": att.file_type
+            } for att in attachments
+        ],
+        "notes": notes
+    }
+
+
+def assign_engineer_to_request(db: Session, request_id: int, engineer_id: Optional[str]) -> Optional[ServiceRequest]:
+    sr = db.query(ServiceRequest).filter(ServiceRequest.id == request_id).first()
+    if not sr:
+        return None
+
+    sr.assigned_engineer_id = engineer_id if engineer_id else None
+    if sr.assigned_engineer_id and sr.status == "Pending Review":
+        sr.status = "Under Assessment"
+
+    db.commit()
+    db.refresh(sr)
+    return sr
+
+
+def update_service_request_status(
+    db: Session,
+    request_id: int,
+    status: str,
+    admin_remarks: Optional[str] = None,
+    quotation_reference_number: Optional[str] = None
+) -> Optional[ServiceRequest]:
+    sr = db.query(ServiceRequest).filter(ServiceRequest.id == request_id).first()
+    if not sr:
+        return None
+
+    sr.status = status
+    if admin_remarks:
+        sr.admin_remarks = admin_remarks
+    if quotation_reference_number:
+        sr.quotation_reference_number = quotation_reference_number
+
+    now = datetime.utcnow()
+    if status == "Completed":
+        sr.completed_at = now
+
+    db.commit()
+    db.refresh(sr)
+    return sr
+
+
+def add_service_request_note(db: Session, request_id: int, sender_id: str, message: str, is_internal_note: bool = False) -> ServiceRequestNote:
+    note = ServiceRequestNote(
+        request_id=request_id,
+        sender_id=sender_id,
+        message=message,
+        is_internal_note=is_internal_note
+    )
+    db.add(note)
+    db.commit()
+    db.refresh(note)
+    return note
+
+
+def insert_notification(
+    db: Session,
+    user_id: Optional[int],
+    n_type: str,
+    title: str,
+    message: str,
+    payload: dict,
+    priority: str = "medium"
+):
+    query = text("""
+        INSERT INTO notifications (user_id, type, title, message, payload, priority, channel, status, created_at)
+        VALUES (:user_id, :type, :title, :message, :payload, :priority, 'in_app', 'sent', NOW())
+    """)
+    db.execute(query, {
+        "user_id": user_id,
+        "type": n_type,
+        "title": title,
+        "message": message,
+        "payload": json.dumps(payload),
+        "priority": priority.lower()
+    })
+    db.commit()
+
+
+def get_user_id_by_code(db: Session, code: str) -> Optional[int]:
+    user = db.query(User).filter(User.client_employee_id == code).first()
+    return user.id if user else None
+
+
+def notify_admin_and_assignee(
+    db: Session,
+    n_type: str,
+    title: str,
+    message: str,
+    payload: dict,
+    engineer_code: Optional[str] = None,
+    priority: str = "medium"
+):
+    admins = db.query(User).filter(User.role == "admin").all()
+    user_ids = [a.id for a in admins]
+
+    if engineer_code:
+        eng_id = get_user_id_by_code(db, engineer_code)
+        if eng_id and eng_id not in user_ids:
+            user_ids.append(eng_id)
+
+    for uid in user_ids:
+        insert_notification(db, uid, n_type, title, message, payload, priority)

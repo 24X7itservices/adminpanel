@@ -20,7 +20,7 @@ from sqlalchemy import (
     Date,
     Boolean,
 )
-from sqlalchemy.orm import declarative_base
+from sqlalchemy.orm import relationship, declarative_base
 from pydantic import field_validator
 from enum import Enum
 from sqlalchemy import JSON
@@ -1838,4 +1838,164 @@ class AcceptProjectRequest(BaseModel):
     visit_time: str
     notes: str = ""
 
+# ============================================================
+# Grievance Model Begin
+# ============================================================
+
+class Grievance(Base):
+    __tablename__ = "grievances"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    ticket_number = Column(String(50), unique=True, nullable=False, index=True)
+    client_employee_id = Column(String(50), nullable=False, index=True)
+    project_id = Column(String(50), nullable=True, index=True)
+    assigned_engineer_id = Column(String(50), nullable=True, index=True)
+    category = Column(String(100), nullable=False, default="Technical Issue")
+    subject = Column(String(255), nullable=False)
+    description = Column(Text, nullable=False)
+    priority = Column(String(20), nullable=False, default="Medium")  # Low, Medium, High, Critical
+    status = Column(String(30), nullable=False, default="Open")       # Open, In Progress, Resolved, Closed
+    resolution_remarks = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    resolved_at = Column(DateTime, nullable=True)
+    closed_at = Column(DateTime, nullable=True)
+
+    attachments = relationship("GrievanceAttachment", back_populates="grievance", cascade="all, delete-orphan")
+    replies = relationship("GrievanceReply", back_populates="grievance", cascade="all, delete-orphan")
+
+class GrievanceAttachment(Base):
+    __tablename__ = "grievance_attachments"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    grievance_id = Column(Integer, ForeignKey("grievances.id", ondelete="CASCADE"), nullable=False)
+    file_name = Column(String(255), nullable=False)
+    file_path = Column(String(500), nullable=False)
+    file_type = Column(String(100), nullable=True)
+    file_size = Column(Integer, nullable=True)
+    uploaded_by = Column(String(50), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    grievance = relationship("Grievance", back_populates="attachments")
+
+class GrievanceReply(Base):
+    __tablename__ = "grievance_replies"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    grievance_id = Column(Integer, ForeignKey("grievances.id", ondelete="CASCADE"), nullable=False)
+    sender_id = Column(String(50), nullable=False)
+    message = Column(Text, nullable=False)
+    is_internal_note = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    grievance = relationship("Grievance", back_populates="replies")
+
+class StatusUpdateRequest(BaseModel):
+    grievance_id: int
+    user_id: str
+    user_role: str
+    status: str  # Open, In Progress, Resolved, Closed
+    resolution_remarks: Optional[str] = None
+
+class ReplyCreateRequest(BaseModel):
+    grievance_id: int
+    sender_id: str
+    user_role: str
+    message: str
+    is_internal_note: bool = False
+
+class ViewTicketRequest(BaseModel):
+    grievance_id: int
+    user_id: str
+    user_role: str
+
+class AssignEngineerRequest(BaseModel):
+    grievance_id: int
+    admin_id: str
+    admin_role: str
+    assigned_engineer_id: Optional[str] = None  # None or empty string will unassign
+
+# ============================================================
+# Service Request Model Begin
+# ============================================================
+
+class ServiceRequest(Base):
+    __tablename__ = "service_requests"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    request_number = Column(String(50), unique=True, nullable=False, index=True)
+    client_employee_id = Column(String(50), nullable=False, index=True)
+    project_id = Column(String(50), nullable=True, index=True)
+    assigned_engineer_id = Column(String(50), nullable=True, index=True)
     
+    service_category = Column(String(100), nullable=False, default="Maintenance")
+    service_title = Column(String(255), nullable=False)
+    service_description = Column(Text, nullable=False)
+    priority = Column(String(20), nullable=False, default="Medium")
+    preferred_date = Column(Date, nullable=True)
+    preferred_time_slot = Column(String(50), nullable=True)
+    service_location = Column(Text, nullable=True)
+    
+    status = Column(String(50), nullable=False, default="Pending Review")
+    quotation_reference_number = Column(String(100), nullable=True)
+    admin_remarks = Column(Text, nullable=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    scheduled_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+
+    attachments = relationship("ServiceRequestAttachment", back_populates="service_request", cascade="all, delete-orphan")
+    notes = relationship("ServiceRequestNote", back_populates="service_request", cascade="all, delete-orphan")
+
+class ServiceRequestAttachment(Base):
+    __tablename__ = "service_request_attachments"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    request_id = Column(Integer, ForeignKey("service_requests.id", ondelete="CASCADE"), nullable=False)
+    file_name = Column(String(255), nullable=False)
+    file_path = Column(String(500), nullable=False)
+    file_type = Column(String(100), nullable=True)
+    file_size = Column(Integer, nullable=True)
+    uploaded_by = Column(String(50), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    service_request = relationship("ServiceRequest", back_populates="attachments")
+
+class ServiceRequestNote(Base):
+    __tablename__ = "service_request_notes"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    request_id = Column(Integer, ForeignKey("service_requests.id", ondelete="CASCADE"), nullable=False)
+    sender_id = Column(String(50), nullable=False)
+    message = Column(Text, nullable=False)
+    is_internal_note = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    service_request = relationship("ServiceRequest", back_populates="notes")
+
+class ViewServiceRequestSchema(BaseModel):
+    request_id: int
+    user_id: str
+    user_role: str
+
+class AssignRequestSchema(BaseModel):
+    request_id: int
+    admin_id: str
+    admin_role: str
+    assigned_engineer_id: Optional[str] = None
+
+class StatusUpdateSchema(BaseModel):
+    request_id: int
+    user_id: str
+    user_role: str
+    status: str
+    admin_remarks: Optional[str] = None
+    quotation_reference_number: Optional[str] = None
+
+class NoteCreateSchema(BaseModel):
+    request_id: int
+    sender_id: str
+    user_role: str
+    message: str
+    is_internal_note: bool = False
+
